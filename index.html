@@ -1850,19 +1850,50 @@
     document.getElementById("tDate").value = now.toISOString().slice(0, 16);
     document.getElementById("walletAddr").value = walletAddr || "";
     bindTg();
-    // Show cached price instantly if any
+    // ---- boot: show cache, then ALWAYS fetch live price once (no click needed) ----
     try {
       const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
       if (cached && cached.q && cached.q.usd) {
         quote = Object.assign({}, cached.q, { cached: true, stale: false });
         live = quote.usd;
+        if (quote.dexUsd != null) dexPrice = quote.dexUsd;
+        if (quote.cexUsd != null) cexPrice = quote.cexUsd;
       }
     } catch (_) {}
     render();
-    // Live price right away (auto — no button needed)
-    refreshPrice(true);
+
+    (async function bootPrice() {
+      fetching = false; // never start stuck
+      const meta = document.getElementById("priceMeta");
+      if (meta && live == null) meta.textContent = "در حال دریافت قیمت…";
+      try {
+        await getPrice(true);
+        try { render(); } catch (_) {}
+      } catch (e) {
+        console.error("boot price", e);
+        // one automatic retry after 2s
+        setTimeout(async () => {
+          try {
+            await getPrice(true);
+            try { render(); } catch (_) {}
+          } catch (e2) {
+            console.error("boot price retry", e2);
+            const el = document.getElementById("livePrice");
+            const m = document.getElementById("priceMeta");
+            if (live != null && Number.isFinite(Number(live))) {
+              if (el) el.textContent = fmt(live, 4);
+              if (m) m.textContent = "آخرین قیمت · اتصال تازه ناموفق";
+            } else if (m) {
+              m.textContent = "قیمت در دسترس نیست · بعداً خودش دوباره تلاش می‌کند";
+            }
+          }
+        }, 2000);
+      }
+    })();
+
     setTimeout(() => { refreshChart(); }, 800);
     setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 2000);
+    // keep auto-updating
     setInterval(() => refreshPrice(false), 15000);
     // auto re-sync wallet every 10 minutes
     setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
