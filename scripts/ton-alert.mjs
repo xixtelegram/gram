@@ -314,17 +314,17 @@ function positionStance(pos, live) {
   const hasGram = pos && pos.gram > 1e-6;
   const hasUsdt = pos && pos.cash > 1e-6;
   if (hasGram && !hasUsdt) {
-    return { mode: "hold_gram", label: "الان GRAM داری — منتظر اوج سود برای فروش", action: "sell" };
+    return { mode: "hold_gram", label: "GRAM داری", action: "sell" };
   }
   if (hasUsdt && !hasGram) {
-    return { mode: "hold_usdt", label: "الان USDT داری — منتظر ریزش GRAM برای خرید", action: "buy" };
+    return { mode: "hold_usdt", label: "USDT داری", action: "buy" };
   }
   if (hasGram && hasUsdt) {
     const gVal = pos.gram * (live || pos.avg || 0);
     if (gVal >= pos.cash) {
-      return { mode: "hold_gram", label: "بیشتر GRAM داری — تمرکز روی فروش در اوج", action: "sell" };
+      return { mode: "hold_gram", label: "بیشتر GRAM داری", action: "sell" };
     }
-    return { mode: "hold_usdt", label: "بیشتر USDT داری — تمرکز روی خرید در کف", action: "buy" };
+    return { mode: "hold_usdt", label: "بیشتر USDT داری", action: "buy" };
   }
   return { mode: "empty", label: "پوزیشن خالی", action: null };
 }
@@ -346,62 +346,72 @@ function buyIsWorthwhile(pos, price) {
   return true;
 }
 
-/** Full last-swap suggestion block (same idea as the app advice card) */
+/** Clear last-swap advice (approved beginner-friendly copy) */
 function lastSwapAdviceBlock(pos, price) {
   if (!pos || !pos.lastSwapPrice || !pos.lastSwapType) return "";
   const ref = pos.lastSwapPrice;
   const ROUND = 0.2;
   const pad = 1 - ROUND / 100;
-  const levels = [0.5, 1, 1.5, 2, 3, 5];
-  let out = "\n\n💡 پیشنهاد بر اساس سواپ آخر";
+  const levels = [
+    { pct: 0.5, tag: "کمی" },
+    { pct: 1, tag: "بهتر" },
+    { pct: 2, tag: "خوب" },
+    { pct: 3, tag: "خیلی خوب" },
+    { pct: 5, tag: "عالی" },
+  ];
+  let out = "\n\nپیشنهاد:";
   if (pos.lastSwapType === "buy") {
     const curPct = price ? ((price - ref) / ref) * 100 : null;
-    out += `\nآخرین سواپ: خرید GRAM @ ${fmt(ref)}`;
+    out += `\nآخرین خرید تو: ${fmt(ref)} USDT`;
+    if (price) out += `\nقیمت الان:     ${fmt(price)} USDT`;
     if (curPct != null) {
-      out += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? "سود " : "ضرر "}${Math.abs(curPct).toFixed(2)}٪ نسبت به خرید`;
+      out += `\nیعنی حدود ${curPct >= 0 ? "+" : "−"}${Math.abs(curPct).toFixed(2)}٪ ${curPct >= 0 ? "بالاتر" : "پایین‌تر"} از خرید`;
     }
-    if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی فروش را در نظر بگیری";
-    else out += "\nمنتظر رشد بالای اهداف فروش بمان";
-    out += "\nاهداف فروش:";
-    for (const pct of levels) {
+    if (pos.gram > 0) out += `\n\nوضعیت تو: GRAM داری` + (pos.cash > 0 ? ` (و ${fmt(pos.cash, 2)} USDT)` : "");
+    if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\nاگر بفروشی، نسبت به خریدت در سودی (لغزش را در نظر بگیر).";
+    else out += "\nبرای فروش بهتر است صبر کنی تا نزدیک اهداف زیر برسد.";
+    out += "\n\nاهداف فروش پیشنهادی:";
+    for (const L of levels) {
       const slip = pos.gram > 0 ? estSlippagePct(pos.gram) / 100 : 0;
-      const midNeed = (ref * (1 + pct / 100)) / Math.max(0.5, 1 - slip) / pad;
-      out += `\n• +${pct}٪ → mid ≈ ${fmt(midNeed)}`;
+      const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+      out += `\n• ${L.tag} (+${L.pct}٪): حدود ${fmt(midNeed)}`;
     }
   } else {
     const curPct = price ? ((ref - price) / ref) * 100 : null;
-    out += `\nآخرین سواپ: فروش GRAM @ ${fmt(ref)}`;
+    out += `\nآخرین فروش تو: ${fmt(ref)} USDT`;
+    if (price) out += `\nقیمت الان:     ${fmt(price)} USDT`;
     if (curPct != null) {
-      out += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? curPct.toFixed(2) + "٪ ارزان‌تر از فروش" : Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش"}`;
+      out += `\nیعنی حدود ${curPct >= 0 ? "−" : "+"}${Math.abs(curPct).toFixed(2)}٪ ${curPct >= 0 ? "ارزان‌تر" : "گران‌تر"} از وقتی فروختی`;
     }
-    if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی دوباره بخری";
-    else out += "\nمنتظر ریزش زیر اهداف خرید بمان";
-    out += "\nاهداف خرید:";
-    for (const pct of levels) {
-      const target = ref * (1 - pct / 100) * pad;
-      out += `\n• −${pct}٪ → زیر ${fmt(target)}`;
+    out += `\n\nوضعیت تو: ${pos.cash > 0 ? `USDT داری (حدود ${fmt(pos.cash, 2)})` : "USDT کمی داری"}`;
+    if (pos.gram > 1e-6) out += " · کمی هم GRAM داری";
+    if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\nاگر دوباره بخری، نسبت به فروش قبلی‌ات جا برای سود داری.";
+    else out += "\nعجله نکن. برای خرید دوباره بهتر است صبر کنی تا نزدیک اهداف پایین بیاید:";
+    out += "\n\nاهداف خرید پیشنهادی:";
+    for (const L of levels) {
+      const target = ref * (1 - L.pct / 100) * pad;
+      out += `\n• ${L.tag} (−${L.pct}٪): حدود ${fmt(target)}`;
     }
   }
   return out;
 }
 
 function stanceLine(stance, pos, price) {
-  let line = "📍 " + stance.label;
-  if (stance.mode === "hold_gram" && pos && pos.avg) {
-    const pct = price ? ((price - pos.avg) / pos.avg) * 100 : null;
-    line += `\nمیانگین ورود: ${fmt(pos.avg)}`;
-    if (pct != null) line += ` · سود/زیان شناور: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}٪`;
-    if (price && !sellIsWorthwhile(pos, price)) line += "\n⚠️ هنوز نزدیک سربه‌سر — فروش الکی پیشنهاد نمی‌شود";
-  }
-  if (stance.mode === "hold_usdt" && pos) {
-    if (pos.lastSwapType === "sell" && pos.lastSwapPrice) {
-      line += `\nآخرین فروش: ${fmt(pos.lastSwapPrice)}`;
+  let line = "";
+  if (stance.mode === "hold_gram") {
+    line = "وضعیت تو: GRAM داری";
+    if (pos && pos.avg) {
+      line += `\nمیانگین ورود: ${fmt(pos.avg)}`;
       if (price) {
-        const pct = ((pos.lastSwapPrice - price) / pos.lastSwapPrice) * 100;
-        line += ` · فاصله: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}٪ ارزان‌تر`;
+        const pct = ((price - pos.avg) / pos.avg) * 100;
+        line += `\nنسبت به ورود: ${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}٪`;
       }
     }
-    line += `\nموجودی USDT: ${fmt(pos.cash, 2)}`;
+  } else if (stance.mode === "hold_usdt") {
+    line = "وضعیت تو: USDT داری" + (pos && pos.cash > 0 ? ` (حدود ${fmt(pos.cash, 2)})` : "");
+    if (pos && pos.gram > 1e-6) line += `\nکمی هم GRAM داری: ${fmt(pos.gram, 4)}`;
+  } else {
+    line = "وضعیت تو: پوزیشن مشخصی نیست";
   }
   line += lastSwapAdviceBlock(pos, price);
   return line;
@@ -454,15 +464,16 @@ async function main() {
   // Fixed thresholds
   if (ALERT_ABOVE != null && live >= ALERT_ABOVE && !recently(mem, "above")) {
     mark(mem, "above");
-    let msg = `🔺 GRAM به ${fmt(live)} رسید (سقف ${fmt(ALERT_ABOVE)})\n${stanceLine(stance, pos, live)}`;
-    if (stance.action === "sell" && sellIsWorthwhile(pos, live)) msg += "\n✅ الان بالای هدف — آماده فروش باش";
-    msgs.push(msg);
+    msgs.push(`🔺 قیمت به سقف مورد نظرت رسید
+
+سقف تو: ${fmt(ALERT_ABOVE)}
+قیمت الان: ${fmt(live)}
+
+${stanceLine(stance, pos, live)}`);
   }
   if (ALERT_BELOW != null && live <= ALERT_BELOW && !recently(mem, "below")) {
     mark(mem, "below");
-    let msg = `🔻 GRAM به ${fmt(live)} رسید (کف ${fmt(ALERT_BELOW)})\n${stanceLine(stance, pos, live)}`;
-    if (stance.action === "buy" && buyIsWorthwhile(pos, live)) msg += "\n✅ قیمت پایین آمده — آماده خرید GRAM باش";
-    msgs.push(msg);
+    msgs.push(`🔻 قیمت به کف مورد نظرت رسید\n\nکف تو: ${fmt(ALERT_BELOW)}\nقیمت الان: ${fmt(live)}\n\n${stanceLine(stance, pos, live)}`);
   }
 
   // Profit / loss targets
@@ -472,7 +483,7 @@ async function main() {
       const key = `profit_${target}`;
       if (curPct >= target && !recently(mem, key)) {
         mark(mem, key);
-        msgs.push(`✅ هدف سود ${target}٪ رسید\nسود فعلی ${curPct.toFixed(2)}٪ · قیمت ${fmt(live)}\n${stanceLine(stance, pos, live)}\nاگر روند صعودی ادامه دارد کمی صبر کن؛ اگر برگشت، بفروش`);
+        msgs.push(`✅ نسبت به خریدت در سودی\n\nقیمت الان: ${fmt(live)}\nسود شناور حدود +${curPct.toFixed(2)}٪ (هدف: +${target}٪)\n\n${stanceLine(stance, pos, live)}`);
         break;
       }
     }
@@ -480,7 +491,7 @@ async function main() {
       const key = `loss_${loss}`;
       if (curPct <= -loss && !recently(mem, key)) {
         mark(mem, key);
-        msgs.push(`⚠️ هشدار ضرر ${loss}٪\nزیان فعلی ${curPct.toFixed(2)}٪ · قیمت ${fmt(live)}\n${stanceLine(stance, pos, live)}`);
+        msgs.push(`⚠️ نسبت به خریدت کمی عقب افتادی\n\nقیمت الان: ${fmt(live)}\nزیان شناور حدود ${curPct.toFixed(2)}٪ (آستانه: −${loss}٪)\nاین ضرر هنوز قطعی نشده مگر بفروشی.\n\n${stanceLine(stance, pos, live)}`);
         break;
       }
     }
@@ -490,7 +501,7 @@ async function main() {
   if (mom.dir === "up" && stance.action === "sell" && !recently(mem, "mom_up_sell", COOL_MOM_MS)) {
     if (sellIsWorthwhile(pos, live)) {
       mark(mem, "mom_up_sell");
-      msgs.push(`📈 GRAM در حال رشد است (+${fmt(Math.abs(mom.delta))} از ${fmt(mom.from)})\nقیمت الان: ${fmt(live)}\n${stanceLine(stance, pos, live)}\n🟢 آماده‌باش فروش — نزدیک اوج می‌توانی بفروشی`);
+      msgs.push(`📈 قیمت در حال بالا رفتن است\n\nاز ${fmt(mom.from)} به ${fmt(live)} (حدود +${fmt(Math.abs(mom.delta))})\n\n${stanceLine(stance, pos, live)}`);
     }
   }
   if (mom.dir === "down" && stance.action === "sell" && !recently(mem, "mom_down_sell", COOL_MOM_MS)) {
@@ -510,7 +521,7 @@ async function main() {
     const drop = Math.abs(mom.delta);
     if (drop >= (mom.noise || noiseAbs(live)) && buyIsWorthwhile(pos, live)) {
       mark(mem, "mom_down_buy");
-      msgs.push(`📉 GRAM ریزش کرده (−${fmt(drop)} از ${fmt(mom.from)})\nقیمت الان: ${fmt(live)}\n${stanceLine(stance, pos, live)}\n🟢 فرصت خرید نزدیک است`);
+      msgs.push(`📉 قیمت پایین آمده\n\nاز ${fmt(mom.from)} به ${fmt(live)} (حدود −${fmt(drop)})\n\n${stanceLine(stance, pos, live)}`);
     }
   }
   if (mom.dir === "up" && stance.action === "buy" && !recently(mem, "mom_up_buy", COOL_MOM_MS)) {
@@ -518,28 +529,31 @@ async function main() {
     const chasing = ref != null && live > ref + (mom.noise || noiseAbs(live));
     if (!chasing && (buyIsWorthwhile(pos, live) || Math.abs(mom.delta) >= (mom.noise || noiseAbs(live)))) {
       mark(mem, "mom_up_buy");
-      msgs.push(`📈 GRAM بعد از ضعف دوباره رشد می‌کند (+${fmt(Math.abs(mom.delta))})\nقیمت الان: ${fmt(live)}\n${stanceLine(stance, pos, live)}\n🟢 وقت خرید است — قبل از رشد بیشتر`);
+      msgs.push(`📈 قیمت بعد از ضعف دوباره بالا می‌آید\n\nحرکت حدود +${fmt(Math.abs(mom.delta))}\nقیمت الان: ${fmt(live)}\n\n${stanceLine(stance, pos, live)}`);
     }
   }
 
   // Forced / manual report — always send status so user sees the bot works
   const forceReport = process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch";
   if (forceReport) {
-    let msg = `📊 وضعیت GRAM\nقیمت: ${fmt(live)} USDT (${priceInfo.source})`;
+    let msg = `📊 وضعیت الان
+
+قیمت: ${fmt(live)} USDT (${priceInfo.source})`;
     if (priceInfo.dexUsd != null && priceInfo.cexUsd != null) {
-      msg += `\nDEX ${fmt(priceInfo.dexUsd)} · CEX ${fmt(priceInfo.cexUsd)}`;
+      msg += `
+DEX ${fmt(priceInfo.dexUsd)} · CEX ${fmt(priceInfo.cexUsd)}`;
     }
-    if (mom.dir === "up") msg += `\nروند کوتاه: صعودی (+${fmt(Math.abs(mom.delta))})`;
-    else if (mom.dir === "down") msg += `\nروند کوتاه: نزولی (−${fmt(Math.abs(mom.delta))})`;
-    else msg += `\nروند کوتاه: خنثی (نویز ~${noiseAbs(live).toFixed(4)})`;
-    msg += `\n${stanceLine(stance, pos, live)}`;
     if (pos) {
-      if (pos.gram > 0) msg += `\nموجودی: ${fmt(pos.gram, 4)} GRAM`;
-      if (pos.cash > 0) msg += `\nUSDT: ${fmt(pos.cash, 2)}`;
-      msg += `\nارزش کل: ${fmt(pos.equity, 2)}`;
-      if (pos.avg > 0) msg += `\nمیانگین ورود: ${fmt(pos.avg)}`;
+      if (pos.gram > 0) msg += `
+موجودی GRAM: ${fmt(pos.gram, 4)}`;
+      if (pos.cash > 0) msg += `
+موجودی USDT: ${fmt(pos.cash, 2)}`;
+      msg += `
+ارزش تقریبی کل: ${fmt(pos.equity, 2)}`;
     }
-    msg += `\n\n(اجرای ${process.env.EVENT_NAME || "manual/schedule"})`;
+    msg += `
+
+${stanceLine(stance, pos, live)}`;
     msgs.push(msg);
   }
 
