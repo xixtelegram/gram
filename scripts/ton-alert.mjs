@@ -278,6 +278,14 @@ async function main() {
     msgs.push(msg);
   }
 
+  // یک پیام در هر اجرای زمان‌بندی‌شده (جلوگیری از اسپم)
+  if (!(process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch") && msgs.length > 1) {
+    msgs = [msgs[0]];
+  } else if ((process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch") && msgs.length > 1) {
+    const status = msgs.find((m) => m.startsWith("📊")) || msgs[msgs.length - 1];
+    msgs = [status];
+  }
+
   saveState(mem);
   if (!msgs.length) {
     console.log("No alerts to send (no threshold; scheduled without REPORT)");
