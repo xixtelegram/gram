@@ -1,17 +1,16 @@
 /**
  * GRAM Telegram alerts for GitHub Actions.
- * Shared logic: ./gram-core.mjs
+ * Shared logic: ./gram-core.mjs + ./telegram-messages.mjs
  *
  * Required secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WALLET_ADDRESS
  * Optional: ALERT_ABOVE, ALERT_BELOW, ALERT_PROFIT_PCTS, ALERT_LOSS_PCTS
- * REPORT=1 or workflow_dispatch → always send status
+ * REPORT=1 or workflow_dispatch → status report (text + chart image)
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import {
   STON_POOL,
   parseSwapsFromEvents,
   calcState,
-  stanceLine,
   positionStance,
   sellIsWorthwhile,
   buyIsWorthwhile,
@@ -19,8 +18,22 @@ import {
   noiseAbs,
   fmt,
   num,
-  MIN_ACTION_PCT,
 } from "./gram-core.mjs";
+import {
+  stanceLine as tgStance,
+  buildStatusMessage,
+  msgCeiling,
+  msgFloor,
+  msgProfitBuy,
+  msgLossBuy,
+  msgProfitSell,
+  msgLossSell,
+  msgTrendUp,
+  msgTrendDown,
+  msgDrop,
+  msgBounce,
+  statusChartUrl,
+} from "./telegram-messages.mjs";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const CHAT = process.env.TELEGRAM_CHAT_ID || "";
@@ -130,6 +143,25 @@ async function sendTelegram(text) {
   if (!j.ok) throw new Error(j.description || "telegram failed");
 }
 
+/** Text + optional chart image (caption max ~1024 chars) */
+async function sendTelegramPhoto(caption, photoUrl) {
+  if (!TOKEN || !CHAT) throw new Error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing");
+  if (!photoUrl) return sendTelegram(caption);
+  const cap = String(caption || "").slice(0, 1024);
+  const url =
+    `https://api.telegram.org/bot${TOKEN}/sendPhoto` +
+    `?chat_id=${encodeURIComponent(CHAT)}` +
+    `&photo=${encodeURIComponent(photoUrl)}` +
+    `&caption=${encodeURIComponent(cap)}`;
+  try {
+    const j = await fetchJson(url, 20000);
+    if (!j.ok) throw new Error(j.description || "photo failed");
+  } catch (e) {
+    console.warn("sendPhoto failed, fallback text:", e.message);
+    await sendTelegram(caption);
+  }
+}
+
 function loadState() {
   try {
     if (existsSync(STATE_PATH)) return JSON.parse(readFileSync(STATE_PATH, "utf8"));
@@ -158,6 +190,22 @@ function pushSample(mem, p) {
   return mem.series;
 }
 
+function lastTradeFromPos(pos) {
+  if (!pos || !(pos.lastSwapPrice > 0) || !pos.lastSwapType) return null;
+  return { type: pos.lastSwapType, price: pos.lastSwapPrice };
+}
+
+function checks() {
+  return {
+    sellIsWorthwhile: (s, p) => sellIsWorthwhile(s, p, poolTonReserve),
+    buyIsWorthwhile: (s, p) => buyIsWorthwhile(s, p, poolTonReserve),
+  };
+}
+
+function stanceText(pos, live) {
+  return tgStance(pos, live, lastTradeFromPos(pos), checks());
+}
+
 async function main() {
   if (!TOKEN || !CHAT) {
     console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
@@ -184,27 +232,29 @@ async function main() {
   const series = pushSample(mem, live);
   const mom = detectMomentum(series);
   const stance = positionStance(pos);
+  const lt = lastTradeFromPos(pos);
+  const quote = { source: priceInfo.source, dexUsd: priceInfo.dexUsd, cexUsd: priceInfo.cexUsd };
+  /** @type {{text:string, photo?:boolean}[]} */
   const msgs = [];
 
   if (ALERT_ABOVE != null && live >= ALERT_ABOVE && !recently(mem, "above")) {
     mark(mem, "above");
-    msgs.push(`🔺 قیمت به سقف مورد نظرت رسید\n\nسقف تو: ${fmt(ALERT_ABOVE)}\nقیمت الان: ${fmt(live)}\n\n${stanceLine(pos, live, poolTonReserve)}`);
+    msgs.push({ text: msgCeiling(ALERT_ABOVE, live, stanceText(pos, live)) });
   }
   if (ALERT_BELOW != null && live <= ALERT_BELOW && !recently(mem, "below")) {
     mark(mem, "below");
-    msgs.push(`🔻 قیمت به کف مورد نظرت رسید\n\nکف تو: ${fmt(ALERT_BELOW)}\nقیمت الان: ${fmt(live)}\n\n${stanceLine(pos, live, poolTonReserve)}`);
+    msgs.push({ text: msgFloor(ALERT_BELOW, live, stanceText(pos, live)) });
   }
 
-  // Last-swap relative alerts
-  if (pos.lastSwapPrice > 0 && pos.lastSwapType) {
-    const ref = pos.lastSwapPrice;
+  if (lt && lt.price > 0) {
+    const ref = lt.price;
     const movePct = ((live - ref) / ref) * 100;
-    if (pos.lastSwapType === "buy") {
+    if (lt.type === "buy") {
       for (const target of PROFIT_PCTS) {
         const key = "ls_profit_buy_" + target;
         if (movePct >= target && !recently(mem, key)) {
           mark(mem, key);
-          msgs.push(`✅ نسبت به خریدت در سودی\n\nآخرین خرید تو: ${fmt(ref)} USDT\nقیمت الان:     ${fmt(live)} USDT\nیعنی حدود +${movePct.toFixed(2)}٪ (هدف: +${target}٪)\n\n${stanceLine(pos, live, poolTonReserve)}`);
+          msgs.push({ text: msgProfitBuy(movePct, target, ref, live, stanceText(pos, live)) });
           break;
         }
       }
@@ -212,16 +262,16 @@ async function main() {
         const key = "ls_loss_buy_" + loss;
         if (movePct <= -loss && !recently(mem, key)) {
           mark(mem, key);
-          msgs.push(`⚠️ نسبت به خریدت کمی عقب افتادی\n\nآخرین خرید تو: ${fmt(ref)} USDT\nقیمت الان:     ${fmt(live)} USDT\nیعنی حدود ${movePct.toFixed(2)}٪ (آستانه: −${loss}٪)\nاین ضرر هنوز قطعی نشده مگر بفروشی.\n\n${stanceLine(pos, live, poolTonReserve)}`);
+          msgs.push({ text: msgLossBuy(movePct, loss, ref, live, stanceText(pos, live)) });
           break;
         }
       }
-    } else if (pos.lastSwapType === "sell") {
+    } else if (lt.type === "sell") {
       for (const target of PROFIT_PCTS) {
         const key = "ls_profit_sell_" + target;
         if (movePct <= -target && !recently(mem, key)) {
           mark(mem, key);
-          msgs.push(`✅ فرصت خرید نزدیک است\n\nآخرین فروش تو: ${fmt(ref)} USDT\nقیمت الان:     ${fmt(live)} USDT\nیعنی حدود ${movePct.toFixed(2)}٪ نسبت به فروش (هدف: −${target}٪)\n\n${stanceLine(pos, live, poolTonReserve)}`);
+          msgs.push({ text: msgProfitSell(movePct, target, ref, live, stanceText(pos, live)) });
           break;
         }
       }
@@ -229,7 +279,7 @@ async function main() {
         const key = "ls_loss_sell_" + loss;
         if (movePct >= loss && !recently(mem, key)) {
           mark(mem, key);
-          msgs.push(`⚠️ بعد از فروش تو، قیمت کمی بالا رفت\n\nآخرین فروش تو: ${fmt(ref)} USDT\nقیمت الان:     ${fmt(live)} USDT\nیعنی حدود +${movePct.toFixed(2)}٪ گران‌تر از وقتی فروختی (آستانه: +${loss}٪)\n\nعجله نکن — برای خرید دوباره صبر کن.\n\n${stanceLine(pos, live, poolTonReserve)}`);
+          msgs.push({ text: msgLossSell(movePct, loss, ref, live, stanceText(pos, live)) });
           break;
         }
       }
@@ -239,21 +289,21 @@ async function main() {
   if (mom.dir === "up" && stance.action === "sell" && !recently(mem, "mom_up_sell", COOL_MOM_MS)) {
     if (sellIsWorthwhile(pos, live, poolTonReserve)) {
       mark(mem, "mom_up_sell");
-      msgs.push(`📈 قیمت در حال بالا رفتن است\n\nاز ${fmt(mom.from)} به ${fmt(live)} (حدود +${fmt(Math.abs(mom.delta))})\n\n${stanceLine(pos, live, poolTonReserve)}`);
+      msgs.push({ text: msgTrendUp(mom.from, live, mom.delta, stanceText(pos, live)) });
     }
   }
   if (mom.dir === "down" && stance.action === "sell" && !recently(mem, "mom_down_sell", COOL_MOM_MS)) {
     const drop = Math.abs(mom.delta);
     if (drop >= (mom.noise || noiseAbs(live))) {
       mark(mem, "mom_down_sell");
-      msgs.push(`📉 قیمت در حال پایین آمدن است\n\nاز ${fmt(mom.from)} به ${fmt(live)} (حدود −${fmt(drop)})\n\n${stanceLine(pos, live, poolTonReserve)}`);
+      msgs.push({ text: msgTrendDown(mom.from, live, drop, stanceText(pos, live)) });
     }
   }
   if (mom.dir === "down" && stance.action === "buy" && !recently(mem, "mom_down_buy", COOL_MOM_MS)) {
     const drop = Math.abs(mom.delta);
     if (drop >= (mom.noise || noiseAbs(live)) && buyIsWorthwhile(pos, live, poolTonReserve)) {
       mark(mem, "mom_down_buy");
-      msgs.push(`📉 قیمت پایین آمده\n\nاز ${fmt(mom.from)} به ${fmt(live)} (حدود −${fmt(drop)})\n\n${stanceLine(pos, live, poolTonReserve)}`);
+      msgs.push({ text: msgDrop(mom.from, live, drop, stanceText(pos, live)) });
     }
   }
   if (mom.dir === "up" && stance.action === "buy" && !recently(mem, "mom_up_buy", COOL_MOM_MS)) {
@@ -261,41 +311,37 @@ async function main() {
     const chasing = ref != null && live > ref + (mom.noise || noiseAbs(live));
     if (!chasing && (buyIsWorthwhile(pos, live, poolTonReserve) || Math.abs(mom.delta) >= (mom.noise || noiseAbs(live)))) {
       mark(mem, "mom_up_buy");
-      msgs.push(`📈 قیمت بعد از ضعف دوباره بالا می‌آید\n\nحرکت حدود +${fmt(Math.abs(mom.delta))}\nقیمت الان: ${fmt(live)}\n\n${stanceLine(pos, live, poolTonReserve)}`);
+      msgs.push({ text: msgBounce(mom.delta, live, stanceText(pos, live)) });
     }
   }
 
   const forceReport = process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch";
   if (forceReport) {
-    let msg = `📊 وضعیت الان\n\nقیمت: ${fmt(live)} USDT (${priceInfo.source})`;
-    if (priceInfo.dexUsd != null && priceInfo.cexUsd != null) {
-      msg += `\nDEX ${fmt(priceInfo.dexUsd)} · CEX ${fmt(priceInfo.cexUsd)}`;
-    }
-    if (pos.totalGram > 0) msg += `\nموجودی GRAM: ${fmt(pos.totalGram, 4)}`;
-    if (pos.cashUsdt > 0) msg += `\nموجودی USDT: ${fmt(pos.cashUsdt, 2)}`;
-    msg += `\nارزش تقریبی کل: ${fmt(pos.equity, 2)}`;
-    msg += `\n\n${stanceLine(pos, live, poolTonReserve)}`;
-    msgs.push(msg);
+    const status = buildStatusMessage(pos, live, quote, lt, checks(), poolTonReserve);
+    msgs.push({ text: status, photo: true });
   }
 
-  // یک پیام در هر اجرای زمان‌بندی‌شده (جلوگیری از اسپم)
-  if (!(process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch") && msgs.length > 1) {
-    msgs = [msgs[0]];
-  } else if ((process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch") && msgs.length > 1) {
-    const status = msgs.find((m) => m.startsWith("📊")) || msgs[msgs.length - 1];
-    msgs = [status];
+  // یک پیام در هر اجرا
+  let out = msgs;
+  if (!forceReport && out.length > 1) out = [out[0]];
+  else if (forceReport && out.length > 1) {
+    const status = out.find((m) => m.photo) || out[out.length - 1];
+    out = [status];
   }
 
   saveState(mem);
-  if (!msgs.length) {
+  if (!out.length) {
     console.log("No alerts to send (no threshold; scheduled without REPORT)");
     return;
   }
-  for (const m of msgs) {
-    console.log("Sending:", m.slice(0, 100).replace(/\n/g, " | "));
-    await sendTelegram(m);
+
+  const chart = statusChartUrl(series, live);
+  for (const m of out) {
+    console.log("Sending:", m.text.slice(0, 120).replace(/\n/g, " | "));
+    if (m.photo && chart) await sendTelegramPhoto(m.text, chart);
+    else await sendTelegram(m.text);
   }
-  console.log(`Sent ${msgs.length} message(s)`);
+  console.log(`Sent ${out.length} message(s)`);
 }
 
 main().catch((e) => {
