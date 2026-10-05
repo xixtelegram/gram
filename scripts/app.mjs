@@ -14,7 +14,6 @@ import {
   msgTrendDown,
   msgDrop,
   msgBounce,
-  msgConnected,
 } from "./telegram-messages.mjs";
 
 // ROUND = safety margin on advice only (not P&L)
@@ -24,6 +23,7 @@ const KEY = "gram_trades_v2", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_m
 const DEFAULT_WALLET = ""; // no default — user must paste their own address
 const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
 // Noise as fraction of price (1.2%); floor avoids zero at tiny prices
+// TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / WALLET_ADDRESS → فقط در GitHub Actions Secrets
 const NOISE_PCT = 0.012, NOISE_FLOOR = 0.008;
 const MIN_ACTION_PCT = 0.5; // min edge over BE before suggesting sell/buy
 // Rough pool TON reserve for slippage estimate (updated from STON when available)
@@ -349,23 +349,43 @@ async function syncWallet(force) {
 }
 // starting capital removed — balances & PnL come from wallet + trades only
 function loadTg() {
-  const d = { token: "", chatId: "", enabled: false, alertAbove: "", alertBelow: "", alertTargetPcts: [0.5, 1, 1.5, 2, 2.5, 3], alertLossPcts: [0.5, 1, 1.5, 2], priceReport30m: false };
+  const d = {
+    chatId: "",
+    enabled: false,
+    alertAbove: "",
+    alertBelow: "",
+    alertTargetPcts: [0.5, 1, 1.5, 2, 2.5, 3],
+    alertLossPcts: [0.5, 1, 1.5, 2],
+    priceReport30m: false,
+  };
   try {
     const raw = JSON.parse(localStorage.getItem(TGKEY) || "{}");
     const merged = { ...d, ...raw };
-    // migrate old single alertTargetPct
+    // token is always the built-in bot — never store user tokens
+    delete merged.token;
     if (raw.alertTargetPct != null && (raw.alertTargetPcts == null || !Array.isArray(raw.alertTargetPcts))) {
       const n = Number(raw.alertTargetPct);
       merged.alertTargetPcts = Number.isFinite(n) && n > 0 ? [n] : [5];
     }
-    if (!Array.isArray(merged.alertTargetPcts)) merged.alertTargetPcts = [5];
-    if (!Array.isArray(merged.alertLossPcts)) merged.alertLossPcts = [];
+    if (!Array.isArray(merged.alertTargetPcts)) merged.alertTargetPcts = d.alertTargetPcts.slice();
+    if (!Array.isArray(merged.alertLossPcts)) merged.alertLossPcts = d.alertLossPcts.slice();
     merged.alertTargetPcts = merged.alertTargetPcts.map(Number).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
     merged.alertLossPcts = merged.alertLossPcts.map(Number).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
     return merged;
   } catch { return d; }
 }
-function saveTg() { localStorage.setItem(TGKEY, JSON.stringify(tg)); }
+function saveTg() {
+  const toSave = {
+    chatId: tg.chatId || "",
+    enabled: !!tg.enabled,
+    alertAbove: tg.alertAbove || "",
+    alertBelow: tg.alertBelow || "",
+    alertTargetPcts: tg.alertTargetPcts || [],
+    alertLossPcts: tg.alertLossPcts || [],
+    priceReport30m: !!tg.priceReport30m,
+  };
+  localStorage.setItem(TGKEY, JSON.stringify(toSave));
+}
 
 function takeFromInv(inv, amount) {
   let rem = amount, cost = 0;
@@ -801,19 +821,9 @@ function drawChart(pts, avg) {
   ctx.fillStyle = g; ctx.fill();
 }
 
-function sendTelegram(text) {
-  const token = tg.token.trim(), chat = tg.chatId.trim();
-  if (!token || !chat) return Promise.reject(new Error("توکن و Chat ID لازم است"));
-  const url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(text);
-  return fetch(url).then((r) => r.json()).then((j) => {
-    if (!j.ok) throw new Error(j.description || "ارسال ناموفق");
-    return j;
-  }).catch(() => new Promise((resolve) => {
-    const img = new Image();
-    img.onload = img.onerror = () => resolve(true);
-    img.src = url;
-    setTimeout(() => resolve(true), 1500);
-  }));
+/** Browser never holds the bot token. Real Telegram delivery = GitHub Action + Secrets. */
+function sendTelegram(_text) {
+  return Promise.reject(new Error("تلگرام از مرورگر ارسال نمی‌شود؛ از GitHub Actions استفاده کن"));
 }
 
 /** Record price samples for momentum (keep ~2h at 45s interval) */
@@ -928,7 +938,9 @@ function buildStatusMessage(s) {
 }
 
 function maybeAlert(state) {
-  if (!tg.enabled || !live || !tg.token || !tg.chatId) return;
+  // Browser-side Telegram API disabled (token lives only in Actions secrets)
+  if (!tg.enabled || !live || !tg.chatId) return;
+  return; // delivery via Actions only
   const series = pushPriceSample(live);
   const mom = detectMomentum(series);
   const stance = positionStance(state);
@@ -1297,46 +1309,32 @@ function renderPctChips(containerId, list, kind) {
 }
 
 function bindTg() {
-  document.getElementById("tgToken").value = tg.token;
-  document.getElementById("tgChat").value = tg.chatId;
-  document.getElementById("tgEnabled").checked = !!tg.enabled;
-  document.getElementById("tgAbove").value = tg.alertAbove;
-  document.getElementById("tgBelow").value = tg.alertBelow;
-  document.getElementById("tgPriceReport").checked = !!tg.priceReport30m;
-  ["tgToken", "tgChat", "tgAbove", "tgBelow"].forEach((id) => {
-    const map = { tgToken: "token", tgChat: "chatId", tgAbove: "alertAbove", tgBelow: "alertBelow" };
-    document.getElementById(id).oninput = (e) => { tg[map[id]] = e.target.value; saveTg(); };
-  });
-  document.getElementById("tgEnabled").onchange = (e) => { tg.enabled = e.target.checked; saveTg(); toast(tg.enabled ? "هشدار فعال شد" : "هشدار خاموش شد"); };
-  document.getElementById("tgPriceReport").onchange = (e) => {
-    tg.priceReport30m = e.target.checked;
-    saveTg();
-    toast(tg.priceReport30m ? "گزارش هر ۳۰ دقیقه فعال شد" : "گزارش هر ۳۰ دقیقه خاموش شد");
-  };
-  renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
-  renderPctChips("lossPctList", tg.alertLossPcts, "loss");
-  document.getElementById("btnAddProfitPct").onclick = () => {
-    const n = Number(document.getElementById("tgPctAdd").value);
-    if (!Number.isFinite(n) || n <= 0) { toast("درصد معتبر وارد کن"); return; }
-    if (tg.alertTargetPcts.includes(n)) { toast("این درصد از قبل هست"); return; }
-    tg.alertTargetPcts.push(n);
-    tg.alertTargetPcts.sort((a, b) => a - b);
-    saveTg();
-    document.getElementById("tgPctAdd").value = "";
-    renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
-    toast("هشدار سود +" + n + "٪ اضافه شد");
-  };
-  document.getElementById("btnAddLossPct").onclick = () => {
-    const n = Number(document.getElementById("tgLossAdd").value);
-    if (!Number.isFinite(n) || n <= 0) { toast("درصد معتبر وارد کن"); return; }
-    if (tg.alertLossPcts.includes(n)) { toast("این درصد از قبل هست"); return; }
-    tg.alertLossPcts.push(n);
-    tg.alertLossPcts.sort((a, b) => a - b);
-    saveTg();
-    document.getElementById("tgLossAdd").value = "";
-    renderPctChips("lossPctList", tg.alertLossPcts, "loss");
-    toast("هشدار ضرر −" + n + "٪ اضافه شد");
-  };
+  const chatEl = document.getElementById("tgChat");
+  const enEl = document.getElementById("tgEnabled");
+  const repEl = document.getElementById("tgPriceReport");
+  if (chatEl) chatEl.value = tg.chatId || "";
+  if (enEl) enEl.checked = !!tg.enabled;
+  if (repEl) repEl.checked = !!tg.priceReport30m;
+  if (chatEl) {
+    chatEl.oninput = (e) => {
+      tg.chatId = e.target.value.trim();
+      saveTg();
+    };
+  }
+  if (enEl) {
+    enEl.onchange = (e) => {
+      tg.enabled = e.target.checked;
+      saveTg();
+      toast(tg.enabled ? "هشدار فعال شد" : "هشدار خاموش شد");
+    };
+  }
+  if (repEl) {
+    repEl.onchange = (e) => {
+      tg.priceReport30m = e.target.checked;
+      saveTg();
+      toast(tg.priceReport30m ? "گزارش هر ۳۰ دقیقه فعال شد" : "گزارش هر ۳۰ دقیقه خاموش شد");
+    };
+  }
 }
 
 async function refreshPrice(force) {
@@ -1429,11 +1427,6 @@ document.getElementById("walletAddr").onchange = () => {
 document.getElementById("walletAddr").onkeydown = (e) => {
   if (e.key === "Enter") { e.preventDefault(); syncWallet(true); }
 };
-document.getElementById("btnTgTest").onclick = () => {
-  sendTelegram(msgConnected())
-    .then(() => toast("پیام تست ارسال شد"))
-    .catch((e) => toast(e.message || "ارسال ناموفق"));
-};
 document.getElementById("chartDays").onclick = (e) => {
   const b = e.target.closest("button"); if (!b) return;
   chartDays = Number(b.dataset.d);
@@ -1488,7 +1481,8 @@ setInterval(() => { refreshPrice(false); }, 15000);
 // auto re-sync wallet every 10 minutes
 setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
 setInterval(async () => {
-  if (!tg.priceReport30m || !tg.enabled || !tg.token || !tg.chatId) return;
+  if (!tg.priceReport30m || !tg.enabled || !tg.chatId) return;
+  return; // status report via Actions only
   try {
     await refreshPrice(true);
     const s = calcState(trades, live);
