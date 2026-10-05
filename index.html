@@ -456,8 +456,14 @@
     }
 
     function fmt(n, d) {
-      if (n == null || Number.isNaN(n)) return "—";
-      return Number(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+      if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
+      const x = Number(n);
+      if (!Number.isFinite(x)) return "—";
+      try {
+        return x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+      } catch (_) {
+        return x.toFixed(d);
+      }
     }
     function faDate(iso) {
       try { return new Date(iso).toLocaleString("fa-IR", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
@@ -985,27 +991,31 @@
       const now = Date.now();
       try {
         const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
-        if (!force && cached && now - cached.at < 45000) {
+        if (!force && cached && cached.q && now - cached.at < 45000 && cached.q.usd) {
           quote = { ...cached.q, cached: true, stale: false };
           live = quote.usd;
-          dexPrice = quote.dexUsd != null ? quote.dexUsd : (quote.dex ? quote.usd : dexPrice);
+          dexPrice = quote.dexUsd != null ? quote.dexUsd : dexPrice;
           cexPrice = quote.cexUsd != null ? quote.cexUsd : cexPrice;
           pushPriceSample(live);
           return quote;
         }
       } catch (_) {}
 
-      // Prefer DEX mid for trading decisions; keep CEX for spread/reference
-      let dex = null, cex = null;
-      try { dex = await fromSton(); } catch (_) {}
-      for (const fn of [fromKraken, fromCoinbase, fromLlama, fromGecko]) {
-        try { cex = await fn(); break; } catch (_) {}
-      }
+      // Parallel fetch — first working source wins; DEX preferred for mid
+      const tryOne = async (fn) => { try { return await fn(); } catch (_) { return null; } };
+      const [dex, k, c, l, g] = await Promise.all([
+        tryOne(fromSton),
+        tryOne(fromKraken),
+        tryOne(fromCoinbase),
+        tryOne(fromLlama),
+        tryOne(fromGecko)
+      ]);
+      const cex = k || c || l || g || null;
 
       if (!dex && !cex) {
         try {
           const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
-          if (cached && cached.q) {
+          if (cached && cached.q && cached.q.usd) {
             quote = { ...cached.q, cached: true, stale: true };
             live = quote.usd;
             return quote;
@@ -1016,12 +1026,11 @@
 
       dexPrice = dex ? dex.usd : null;
       cexPrice = cex ? cex.usd : null;
-      // Execution-relevant mid = DEX when available
       const primary = dex || cex;
       const spread = (dexPrice && cexPrice) ? (dexPrice - cexPrice) : null;
       quote = {
         usd: primary.usd,
-        change24h: (cex && cex.change24h != null) ? cex.change24h : (primary.change24h ?? null),
+        change24h: (cex && cex.change24h != null) ? cex.change24h : (primary.change24h != null ? primary.change24h : null),
         source: dex ? ("DEX " + (dex.source || "STON")) : primary.source,
         dexUsd: dexPrice,
         cexUsd: cexPrice,
@@ -1031,7 +1040,7 @@
         at: now
       };
       live = quote.usd;
-      localStorage.setItem(PKEY, JSON.stringify({ at: now, q: quote }));
+      try { localStorage.setItem(PKEY, JSON.stringify({ at: now, q: quote })); } catch (_) {}
       pushPriceSample(live);
       return quote;
     }
@@ -1670,12 +1679,28 @@
     }
 
     async function refreshPrice(force) {
-      if (fetching) return;
+      if (fetching) {
+        if (refreshPrice._since && Date.now() - refreshPrice._since < 8000) return;
+        fetching = false; // recover from stuck state
+      }
       fetching = true;
-      document.getElementById("btnPrice").disabled = true;
-      try { await getPrice(force); render(); }
-      catch { document.getElementById("livePrice").textContent = "—"; document.getElementById("priceMeta").textContent = "خطا در اتصال · بعداً دوباره امتحان کن"; toast("قیمت گرفته نشد"); }
-      finally { fetching = false; document.getElementById("btnPrice").disabled = false; }
+      refreshPrice._since = Date.now();
+      const btn = document.getElementById("btnPrice");
+      if (btn) btn.disabled = true;
+      const meta = document.getElementById("priceMeta");
+      if (meta && live == null) meta.textContent = "در حال اتصال به بازار…";
+      try {
+        await getPrice(!!force);
+        render();
+      } catch (err) {
+        console.error(err);
+        document.getElementById("livePrice").textContent = "—";
+        if (meta) meta.textContent = "خطا در اتصال · دکمه «به‌روز کردن قیمت» را بزن";
+        toast("قیمت گرفته نشد");
+      } finally {
+        fetching = false;
+        if (btn) btn.disabled = false;
+      }
     }
     async function refreshChart() {
       document.getElementById("chartMeta").textContent = "در حال بارگذاری نمودار…";
