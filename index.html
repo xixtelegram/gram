@@ -156,6 +156,7 @@
       </div>
       <div class="row">
         <button class="btn btn-ghost" id="btnPrice" type="button">به‌روز کردن قیمت</button>
+        <button class="btn btn-ghost" id="btnSyncWallet" type="button" title="خواندن سواپ‌ها از کیف‌پول TON">همگام‌سازی کیف‌پول</button>
         <button class="btn btn-ghost" id="btnExport" type="button">خروجی</button>
         <label class="btn btn-ghost" style="margin:0">
           ورود
@@ -163,6 +164,24 @@
         </label>
       </div>
     </header>
+
+    <section class="card" style="margin-bottom:16px" id="walletCard">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <h2 style="margin:0 0 8px">کیف‌پول TON</h2>
+          <p class="muted" style="margin:0">سواپ‌های GRAM ↔ USDT به‌صورت خودکار از تاریخچهٔ زنجیره خوانده می‌شوند</p>
+        </div>
+        <button class="btn btn-ghost" id="btnWalletSettings" type="button" style="height:36px;font-size:12px">تنظیم آدرس</button>
+      </div>
+      <div style="margin-top:12px">
+        <label>آدرس کیف‌پول</label>
+        <input id="walletAddr" placeholder="EQC..." style="font-family:monospace;font-size:13px" dir="ltr" />
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <button class="btn btn-primary" id="btnSyncNow" type="button" style="width:auto;padding-inline:18px">همگام‌سازی الان</button>
+        <span class="muted" id="walletSyncMeta" style="font-size:12px"></span>
+      </div>
+    </section>
 
     <section class="card" style="margin-bottom:16px">
       <p class="muted" style="margin:0">قیمت لحظه‌ای GRAM</p>
@@ -194,6 +213,7 @@
         <div>
           <h2>هشدار تلگرام</h2>
           <p class="muted" style="margin:0">از BotFather توکن بگیر، به ربات /start بزن، Chat ID را از @userinfobot بردار.</p>
+          <p class="muted" style="margin:6px 0 0;color:#f59e0b">⚠️ این هشدار فقط وقتی صفحه باز است کار می‌کند. برای هشدار با مرورگر بسته از GitHub Action در پوشه <code>.github/workflows/</code> استفاده کن.</p>
         </div>
         <label class="switch" title="فعال">
           <input id="tgEnabled" type="checkbox" />
@@ -284,7 +304,7 @@
       <div class="card" id="history" style="display:grid;gap:8px;padding:12px"></div>
     </section>
 
-    <footer>قیمت از Kraken / Coinbase / STON.fi با کش ۴۵ ثانیه · کارمزد DEX حدود ۰.۰۷٪ · داده فقط روی همین مرورگر ذخیره می‌شود</footer>
+    <footer>قیمت از Kraken / Coinbase / STON.fi · سواپ و کارمزد دقیق از tonapi.io · بدون تخمین · داده روی همین مرورگر ذخیره می‌شود</footer>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -310,14 +330,18 @@
 
   <script>
   (function () {
-    const DEX = 0.07, NET = 0.0082, ROUND = 0.2, STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
+    // ROUND only for advice safety-margin display — NOT used in P&L accounting
+    const ROUND = 0.2, STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
     const SEED = [];
-    const KEY = "gram_trades_v2", CAPKEY = "gram_starting_capital_v1", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1";
+    const KEY = "gram_trades_v2", CAPKEY = "gram_starting_capital_v1", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1", WKEY = "gram_wallet_addr_v1";
+    const DEFAULT_WALLET = "EQCw1-hJcfl_YlneBdXmw2OHNx9CO76r5fDrl4gCI4uaf7wR";
+    const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
 
     let trades = loadTrades();
     let capital = loadCapital();
     let tg = loadTg();
-    let live = null, quote = null, tradeType = "buy", chartDays = 7, chartPts = [], confirmFn = null, fetching = false;
+    let walletAddr = loadWallet();
+    let live = null, quote = null, tradeType = "buy", chartDays = 7, chartPts = [], confirmFn = null, fetching = false, syncing = false;
 
     function fmt(n, d) {
       if (n == null || Number.isNaN(n)) return "—";
@@ -340,6 +364,200 @@
       } catch { return SEED.slice(); }
     }
     function saveTrades() { localStorage.setItem(KEY, JSON.stringify(trades)); }
+    function loadWallet() {
+      try { return localStorage.getItem(WKEY) || DEFAULT_WALLET; } catch { return DEFAULT_WALLET; }
+    }
+    function saveWallet(a) {
+      walletAddr = (a || "").trim();
+      localStorage.setItem(WKEY, walletAddr);
+    }
+    function toLocalDatetime(iso) {
+      const d = new Date(iso);
+      const pad = (n) => String(n).padStart(2, "0");
+      return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    }
+    function isUsdt(j) {
+      if (!j) return false;
+      const s = (j.symbol || "").toUpperCase();
+      return s.startsWith("USD") || (j.address && j.address.toLowerCase().includes("b113a994"));
+    }
+    function parseSwapsFromEvents(events) {
+      const out = [];
+      for (const e of events || []) {
+        const ts = new Date(e.timestamp * 1000).toISOString();
+        const eid = e.event_id || "";
+        const actions = e.actions || [];
+        const acct = (e.account && e.account.address || "").toLowerCase();
+        const sameAddr = (a) => (a || "").toLowerCase() === acct;
+
+        // --- JettonSwap (STON.fi etc.): amounts are already net of pool fee ---
+        for (const a of actions) {
+          if (a.status && a.status !== "ok") continue;
+          if (a.type !== "JettonSwap") continue;
+          const js = a.JettonSwap || {};
+          if (isUsdt(js.jetton_master_in) && js.ton_out) {
+            const usdt = Number(js.amount_in) / 1e6;
+            const gram = Number(js.ton_out) / 1e9;
+            if (usdt > 0.01 && gram > 0.01) {
+              out.push({
+                type: "buy", date: toLocalDatetime(ts), gram, usdt,
+                networkFee: 0, dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet"
+              });
+            }
+          } else if (isUsdt(js.jetton_master_out) && js.ton_in) {
+            const usdt = Number(js.amount_out) / 1e6;
+            const gram = Number(js.ton_in) / 1e9;
+            if (usdt > 0.01 && gram > 0.01) {
+              out.push({
+                type: "sell", date: toLocalDatetime(ts), gram, usdt,
+                networkFee: 0, dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet"
+              });
+            }
+          }
+        }
+        if (actions.some((a) => a.type === "JettonSwap")) continue;
+
+        // --- Omniston / multi-leg: measure exact net cashflows of the wallet ---
+        // Also capture intermediate USDT that left the route (DEX fee) and small TON refunds (gas).
+        let tonIn = 0, tonOut = 0, usdtIn = 0, usdtOut = 0;
+        let usdtRoute = 0; // USDT seen in non-user legs (for fee estimate)
+        for (const a of actions) {
+          if (a.status && a.status !== "ok") continue;
+          if (a.type === "TonTransfer") {
+            const tt = a.TonTransfer || {};
+            const amt = Number(tt.amount || 0) / 1e9;
+            if (sameAddr(tt.sender && tt.sender.address)) tonOut += amt;
+            if (sameAddr(tt.recipient && tt.recipient.address)) tonIn += amt;
+          }
+          if (a.type === "JettonTransfer") {
+            const jt = a.JettonTransfer || {};
+            if (!isUsdt(jt.jetton)) continue;
+            const amt = Number(jt.amount || 0) / 1e6;
+            const fromU = sameAddr(jt.sender && jt.sender.address);
+            const toU = sameAddr(jt.recipient && jt.recipient.address);
+            if (fromU) usdtOut += amt;
+            if (toU) usdtIn += amt;
+            if (!fromU && !toU) usdtRoute = Math.max(usdtRoute, amt);
+          }
+        }
+
+        // event.extra is net nanoton change attributed to fees/other (can be negative)
+        const extraTon = typeof e.extra === "number" ? Math.abs(e.extra) / 1e9 : 0;
+
+        if (tonOut > 1 && usdtIn > 0.5 && tonOut > tonIn) {
+          // sell GRAM → USDT
+          const gram = tonOut - tonIn; // net TON leaving wallet (includes gas not refunded)
+          const usdt = usdtIn - usdtOut;
+          const dexFeeUsdt = usdtRoute > usdt ? +(usdtRoute - usdt).toFixed(6) : 0;
+          const networkFee = extraTon > 0 && extraTon < 1 ? +extraTon.toFixed(9) : 0;
+          out.push({
+            type: "sell", date: toLocalDatetime(ts),
+            gram: +gram.toFixed(9), usdt: +usdt.toFixed(6),
+            networkFee, dexFeeUsdt, exact: true, eventId: eid, source: "wallet"
+          });
+        } else if (tonIn > 1 && usdtOut > 0.5 && tonIn > tonOut) {
+          // buy GRAM with USDT
+          const gram = tonIn - tonOut;
+          const usdt = usdtOut - usdtIn;
+          const dexFeeUsdt = usdtRoute > 0 && usdtRoute < usdt ? 0 : 0; // buy side fee usually in less GRAM received
+          const networkFee = extraTon > 0 && extraTon < 1 ? +extraTon.toFixed(9) : 0;
+          out.push({
+            type: "buy", date: toLocalDatetime(ts),
+            gram: +gram.toFixed(9), usdt: +usdt.toFixed(6),
+            networkFee, dexFeeUsdt, exact: true, eventId: eid, source: "wallet"
+          });
+        }
+      }
+      const seen = new Set();
+      return out.filter((s) => {
+        const k = s.eventId || (s.date + s.type + s.gram.toFixed(4));
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return s.gram > 0.5 && s.usdt > 0.5;
+      });
+    }
+    async function fetchWalletSwaps(addr, limit) {
+      const url = "https://tonapi.io/v2/accounts/" + encodeURIComponent(addr) + "/events?limit=" + (limit || 100);
+      const j = await fetchJson(url, 15000);
+      return parseSwapsFromEvents(j.events || []);
+    }
+    async function syncWallet(force) {
+      if (syncing) return;
+      const addr = (document.getElementById("walletAddr").value || walletAddr || "").trim();
+      if (!addr || addr.length < 40) { toast("آدرس کیف‌پول را وارد کن"); return; }
+      saveWallet(addr);
+      syncing = true;
+      const meta = document.getElementById("walletSyncMeta");
+      meta.textContent = "در حال خواندن تاریخچه…";
+      try {
+        const remote = await fetchWalletSwaps(addr, 100);
+        if (!remote.length) {
+          meta.textContent = "سواپی یافت نشد";
+          toast("سواپ GRAM/USDT در تاریخچه پیدا نشد");
+          return;
+        }
+        // merge: keep manual trades, add/update wallet ones by eventId or close date+amounts
+        const existingIds = new Set(trades.filter((t) => t.eventId).map((t) => t.eventId));
+        let added = 0, updated = 0;
+        for (const s of remote) {
+          if (s.eventId && existingIds.has(s.eventId)) {
+            // refresh exact fields on existing wallet trade
+            const ex = trades.find((t) => t.eventId === s.eventId);
+            if (ex) {
+              ex.gram = s.gram; ex.usdt = s.usdt; ex.price = s.usdt / s.gram;
+              ex.networkFee = s.networkFee || 0; ex.dexFeeUsdt = s.dexFeeUsdt || 0;
+              ex.exact = true; ex.source = "wallet";
+            }
+            continue;
+          }
+          // fuzzy match existing manual entry → upgrade to exact wallet data
+          const match = trades.find((t) => !t.eventId && t.type === s.type &&
+            Math.abs(new Date(t.date) - new Date(s.date)) < 3600e3 &&
+            Math.abs(t.gram - s.gram) / s.gram < 0.03 &&
+            Math.abs(t.usdt - s.usdt) / s.usdt < 0.03);
+          if (match) {
+            match.eventId = s.eventId;
+            match.source = "wallet";
+            match.exact = true;
+            match.gram = s.gram;
+            match.usdt = s.usdt;
+            match.price = s.usdt / s.gram;
+            match.networkFee = s.networkFee || 0;
+            match.dexFeeUsdt = s.dexFeeUsdt || 0;
+            delete match.dexFeePct;
+            updated++;
+            continue;
+          }
+          trades.push({
+            id: Date.now() + added,
+            type: s.type,
+            date: s.date,
+            gram: s.gram,
+            usdt: s.usdt,
+            networkFee: s.networkFee || 0,
+            dexFeeUsdt: s.dexFeeUsdt || 0,
+            exact: true,
+            price: s.usdt / s.gram,
+            eventId: s.eventId,
+            source: "wallet"
+          });
+          existingIds.add(s.eventId);
+          added++;
+        }
+        // sort by date ascending
+        trades.sort((a, b) => new Date(a.date) - new Date(b.date));
+        saveTrades();
+        render();
+        meta.textContent = remote.length + " سواپ پیدا شد · " + added + " جدید · " + updated + " به‌روز";
+        toast(added ? (added + " سواپ جدید اضافه شد") : (updated ? "سواپ‌ها به‌روز شدند" : "همه سواپ‌ها قبلاً ثبت شده‌اند"));
+      } catch (err) {
+        meta.textContent = "خطا در همگام‌سازی";
+        toast("خطا در خواندن کیف‌پول — کمی بعد دوباره تلاش کن");
+        console.error(err);
+      } finally {
+        syncing = false;
+      }
+    }
     function loadCapital() {
       try {
         const raw = localStorage.getItem(CAPKEY);
@@ -368,29 +586,15 @@
     }
     function saveTg() { localStorage.setItem(TGKEY, JSON.stringify(tg)); }
 
-    function inferFees(list) {
-      if (!list.length) return { networkFee: NET, dexFeePct: DEX };
-      const sorted = list.slice().sort((a, b) => new Date(b.date) - new Date(a.date));
-      const last = sorted[0];
-      const withNet = list.filter((t) => (t.networkFee || 0) > 0);
-      const withDex = list.filter((t) => (t.dexFeePct || 0) > 0);
-      const avgNet = withNet.length ? withNet.reduce((s, t) => s + t.networkFee, 0) / withNet.length : NET;
-      const avgDex = withDex.length ? withDex.reduce((s, t) => s + t.dexFeePct, 0) / withDex.length : DEX;
-      return {
-        networkFee: (last.networkFee || 0) > 0 ? last.networkFee : avgNet,
-        dexFeePct: (last.dexFeePct || 0) > 0 ? last.dexFeePct : avgDex
-      };
-    }
-
     function takeFromInv(inv, amount) {
       let rem = amount, cost = 0;
-      while (rem > 1e-9 && inv.length) {
+      while (rem > 1e-12 && inv.length) {
         const lot = inv[0];
         const take = Math.min(rem, lot.gram);
         cost += take * lot.costPer;
         lot.gram -= take;
         rem -= take;
-        if (lot.gram < 1e-9) inv.shift();
+        if (lot.gram < 1e-12) inv.shift();
       }
       return { taken: amount - rem, cost: cost };
     }
@@ -400,29 +604,47 @@
       return cash + (price ? g * price : 0);
     }
 
+    /**
+     * Exact P&L accounting.
+     * For wallet-sourced trades (exact:true): gram/usdt are the real on-chain net amounts —
+     * no estimated DEX% is applied on top.
+     * networkFee (TON) and dexFeeUsdt are recorded for display only; cashflow already reflects them.
+     * For legacy manual trades that still have dexFeePct, we honour that percentage once.
+     */
     function calcState(list, price, startCap) {
       const sorted = list.slice().sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
-      let cash = startCap || 0, totalFeesGram = 0, realizedPnl = 0;
+      let cash = startCap || 0;
+      let totalFeesGram = 0, totalFeesUsdt = 0, realizedPnl = 0;
       const inv = [];
       let lastSwapPnl = null, lastSwapPct = null, lastSwapType = null, lastSwapPrice = null;
       for (const t of sorted) {
-        const netFee = Math.max(0, t.networkFee || 0);
-        const dexPct = Math.max(0, (t.dexFeePct != null ? t.dexFeePct : DEX) / 100);
-        totalFeesGram += netFee;
+        const isExact = t.exact === true || t.source === "wallet";
+        const netFeeGram = Math.max(0, t.networkFee || 0);
+        const dexFeeUsdt = Math.max(0, t.dexFeeUsdt || 0);
+        // legacy % only if not exact and explicitly stored
+        const legacyDexPct = (!isExact && t.dexFeePct != null) ? Math.max(0, t.dexFeePct) / 100 : 0;
+
+        totalFeesGram += netFeeGram;
+        totalFeesUsdt += dexFeeUsdt;
+
         const px = t.price > 0 ? t.price : (t.gram > 0 ? t.usdt / t.gram : null);
         const before = equityAt(cash, inv, px);
+
         if (t.type === "buy") {
-          cash -= t.usdt;
-          let net = t.gram * (1 - dexPct);
-          net = Math.max(0, net - netFee);
-          if (net > 1e-12) inv.push({ gram: net, costPer: t.usdt / net });
+          // pay exact USDT, receive exact GRAM (already net of pool fee)
+          const payUsdt = t.usdt;
+          const recvGram = isExact ? t.gram : Math.max(0, t.gram * (1 - legacyDexPct) - netFeeGram);
+          cash -= payUsdt;
+          if (recvGram > 1e-12) inv.push({ gram: recvGram, costPer: payUsdt / recvGram });
         } else {
-          if (netFee > 0) { const feeTake = takeFromInv(inv, netFee); realizedPnl -= feeTake.cost; }
-          const sellTake = takeFromInv(inv, t.gram);
-          const netUsdt = t.usdt * (1 - dexPct);
-          cash += netUsdt;
-          realizedPnl += netUsdt - sellTake.cost;
+          // sell exact GRAM, receive exact USDT (already net of pool fee)
+          const sellGram = t.gram;
+          const recvUsdt = isExact ? t.usdt : t.usdt * (1 - legacyDexPct);
+          const sellTake = takeFromInv(inv, sellGram);
+          cash += recvUsdt;
+          realizedPnl += recvUsdt - sellTake.cost;
         }
+
         const after = equityAt(cash, inv, px);
         lastSwapPnl = after - before;
         lastSwapPct = before !== 0 ? (lastSwapPnl / Math.abs(before)) * 100 : null;
@@ -437,7 +659,7 @@
       return {
         totalGram: remainingGram, cashUsdt: cash, avgBuyPrice: avg, investedUsdt: remainingCost,
         currentValue, equity, totalPnl: equity - (startCap || 0),
-        unrealizedPnl: currentValue - remainingCost, totalFeesGram, realizedPnl,
+        unrealizedPnl: currentValue - remainingCost, totalFeesGram, totalFeesUsdt, realizedPnl,
         startingCapital: startCap || 0, lastSwapPnl, lastSwapPct, lastSwapType, lastSwapPrice
       };
     }
@@ -661,9 +883,14 @@
       if (capital == null) openCapitalModal(false);
       const s = calcState(trades, live, capital || 0);
       const adv = nextAdvice(s, live);
-      const fees = inferFees(trades);
       const hint = document.getElementById("autoFeeHint");
-      if (hint) hint.textContent = "کارمزد خودکار: شبکه " + fmt(fees.networkFee, 5) + " GRAM · DEX " + fmt(fees.dexFeePct, 2) + "٪";
+      if (hint) {
+        const feeG = s.totalFeesGram || 0;
+        const feeU = s.totalFeesUsdt || 0;
+        hint.textContent = feeG > 0 || feeU > 0
+          ? ("کارمزد دقیق از زنجیره: شبکه " + fmt(feeG, 6) + " GRAM" + (feeU > 0 ? " · DEX " + fmt(feeU, 4) + " USDT" : "") + " · بدون تخمین")
+          : "مبالغ سواپ از زنجیره دقیق‌اند · کارمزد DEX داخل مبلغ خالص لحاظ شده";
+      }
       document.getElementById("adviceText").textContent = adv.hint;
       document.getElementById("adviceMeta").textContent = adv.breakEven != null
         ? ("قیمت مرجع: " + fmt(adv.breakEven, 4) + (adv.suggest === "to_usdt" ? " (سواپ به USDT)" : adv.suggest === "to_gram" ? " (سواپ به GRAM)" : ""))
@@ -706,8 +933,9 @@
       if (s.totalGram <= 0 || !s.avgBuyPrice) box.innerHTML = '<p class="empty">بعد از سواپ به GRAM، اهداف اینجا می‌آید</p>';
       else {
         box.innerHTML = [1, 2, 3, 5, 7, 10, 15, 20].map((pct) => {
+          // price needed for +pct profit; ROUND is only a small safety margin for display
           const needed = (s.avgBuyPrice * (1 + pct / 100)) / (1 - ROUND / 100);
-          const usdtOut = s.totalGram * needed * (1 - DEX / 100);
+          const usdtOut = s.totalGram * needed; // exact: no estimated DEX haircut
           const net = usdtOut - s.investedUsdt;
           return '<button class="target" type="button" data-p="' + needed + '"><span class="profit" style="font-weight:800">+' + pct + '٪</span><span><b style="display:block;font-variant-numeric:tabular-nums">' + fmt(needed, 4) + ' USDT</b><span class="muted">≈ ' + fmt(usdtOut, 2) + ' دریافتی</span></span><span class="profit" style="font-weight:800">+' + fmt(net, 2) + "</span></button>";
         }).join("");
@@ -715,10 +943,14 @@
       }
 
       const hist = document.getElementById("history");
-      if (!trades.length) hist.innerHTML = '<p class="empty">هنوز سواپی نیست</p>';
-      else hist.innerHTML = trades.slice().reverse().map((t) =>
-        '<div class="hist"><span class="badge ' + (t.type === "buy" ? "up" : "down") + '">' + (t.type === "buy" ? "→GRAM" : "→USDT") + '</span><div><p style="margin:0;font-weight:700;font-size:14px">' + fmt(t.gram, 4) + " GRAM · " + fmt(t.usdt, 2) + ' USDT</p><p class="muted" style="margin:0">' + faDate(t.date) + " · کارمزد " + fmt(t.networkFee, 5) + '</p></div><div style="text-align:left"><p style="margin:0;font-weight:700;font-size:14px">' + fmt(t.price, 4) + '</p><button class="btn btn-danger" data-id="' + t.id + '" type="button" style="height:28px;padding:0 8px;font-size:12px;margin-top:4px">حذف</button></div></div>'
-      ).join("");
+      if (!trades.length) hist.innerHTML = '<p class="empty">هنوز سواپی نیست · از دکمه «همگام‌سازی کیف‌پول» استفاده کن</p>';
+      else hist.innerHTML = trades.slice().reverse().map((t) => {
+        const feeBits = [];
+        if ((t.networkFee || 0) > 0) feeBits.push("شبکه " + fmt(t.networkFee, 6));
+        if ((t.dexFeeUsdt || 0) > 0) feeBits.push("DEX " + fmt(t.dexFeeUsdt, 4) + " USDT");
+        const feeTxt = feeBits.length ? " · " + feeBits.join(" · ") : (t.exact || t.source === "wallet" ? " · خالص زنجیره" : "");
+        return '<div class="hist"><span class="badge ' + (t.type === "buy" ? "up" : "down") + '">' + (t.type === "buy" ? "→GRAM" : "→USDT") + '</span><div><p style="margin:0;font-weight:700;font-size:14px">' + fmt(t.gram, 4) + " GRAM · " + fmt(t.usdt, 2) + ' USDT</p><p class="muted" style="margin:0">' + faDate(t.date) + (t.source === "wallet" ? " · از کیف‌پول" : " · دستی") + feeTxt + '</p></div><div style="text-align:left"><p style="margin:0;font-weight:700;font-size:14px">' + fmt(t.price, 4) + '</p><button class="btn btn-danger" data-id="' + t.id + '" type="button" style="height:28px;padding:0 8px;font-size:12px;margin-top:4px">حذف</button></div></div>';
+      }).join("");
       hist.querySelectorAll("[data-id]").forEach((b) => b.onclick = () => ask("حذف معامله", "این معامله حذف شود؟", () => {
         trades = trades.filter((x) => x.id !== Number(b.dataset.id)); saveTrades(); render();
       }));
@@ -731,13 +963,14 @@
       const s = calcState(trades, live, capital || 0);
       if (s.totalGram <= 0) { toast("موجودی GRAM نداری"); return; }
       if (!price || price <= 0) { toast("قیمت معتبر وارد کن"); return; }
-      const usdtNet = s.totalGram * price * (1 - DEX / 100);
+      // exact: no estimated DEX haircut on simulated proceeds
+      const usdtNet = s.totalGram * price;
       const profit = usdtNet - s.investedUsdt;
       const pct = s.investedUsdt > 0 ? (profit / s.investedUsdt) * 100 : 0;
       document.getElementById("simPrice").value = price.toFixed(4);
       const el = document.getElementById("simOut");
       el.classList.remove("hidden");
-      el.innerHTML = "<div><b>" + fmt(usdtNet, 2) + '</b><span class="muted">USDT خالص</span></div><div><b class="' + (profit >= 0 ? "profit" : "loss") + '">' + (profit >= 0 ? "+" : "") + fmt(profit, 2) + '</b><span class="muted">سود/زیان</span></div><div><b class="' + (pct >= 0 ? "profit" : "loss") + '">' + (pct >= 0 ? "+" : "") + pct.toFixed(2) + '٪</b><span class="muted">درصد</span></div>';
+      el.innerHTML = "<div><b>" + fmt(usdtNet, 2) + '</b><span class="muted">USDT</span></div><div><b class="' + (profit >= 0 ? "profit" : "loss") + '">' + (profit >= 0 ? "+" : "") + fmt(profit, 2) + '</b><span class="muted">سود/زیان</span></div><div><b class="' + (pct >= 0 ? "profit" : "loss") + '">' + (pct >= 0 ? "+" : "") + pct.toFixed(2) + '٪</b><span class="muted">درصد</span></div>';
     }
 
     function ask(title, text, fn) {
@@ -868,12 +1101,11 @@
       const u = Number(document.getElementById("tUsdt").value);
       const date = document.getElementById("tDate").value;
       if (!date || !g || !u || g <= 0 || u <= 0) { toast("مقدار GRAM و USDT را وارد کن"); return; }
-      const fees = inferFees(trades);
+      // Manual entry is treated as exact amounts you observed (no estimated fee overlay)
       trades.push({
         id: Date.now(), type: tradeType, date, gram: g, usdt: u,
-        networkFee: fees.networkFee,
-        dexFeePct: fees.dexFeePct,
-        price: u / g
+        networkFee: 0, dexFeeUsdt: 0, exact: true,
+        price: u / g, source: "manual"
       });
       saveTrades();
       document.getElementById("tGram").value = "";
@@ -915,6 +1147,13 @@
       r.readAsText(f); e.target.value = "";
     };
     document.getElementById("btnPrice").onclick = () => { refreshPrice(true); refreshChart(); };
+    document.getElementById("btnSyncWallet").onclick = () => syncWallet(true);
+    document.getElementById("btnSyncNow").onclick = () => syncWallet(true);
+    document.getElementById("btnWalletSettings").onclick = () => {
+      document.getElementById("walletAddr").focus();
+      document.getElementById("walletAddr").select();
+    };
+    document.getElementById("walletAddr").onchange = () => saveWallet(document.getElementById("walletAddr").value);
     document.getElementById("btnTgTest").onclick = () => {
       sendTelegram("GRAM Trader متصل شد. هشدار قیمت از این به بعد اینجا می‌آید.")
         .then(() => toast("پیام تست ارسال شد"))
@@ -929,11 +1168,16 @@
 
     const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
     document.getElementById("tDate").value = now.toISOString().slice(0, 16);
+    document.getElementById("walletAddr").value = walletAddr || DEFAULT_WALLET;
     bindTg();
     render();
     refreshPrice(false);
     refreshChart();
+    // auto-sync wallet on load (once)
+    setTimeout(() => { if (walletAddr) syncWallet(false); }, 1200);
     setInterval(() => refreshPrice(false), 45000);
+    // auto re-sync wallet every 10 minutes
+    setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
     setInterval(async () => {
       if (!tg.priceReport30m || !tg.enabled || !tg.token || !tg.chatId) return;
       try {
