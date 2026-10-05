@@ -1142,14 +1142,14 @@
       if (hasGram && !hasUsdt) {
         return {
           mode: "hold_gram",
-          label: "الان GRAM داری — منتظر اوج سود برای فروش",
+          label: "GRAM داری",
           action: "sell"
         };
       }
       if (hasUsdt && !hasGram) {
         return {
           mode: "hold_usdt",
-          label: "الان USDT داری — منتظر ریزش GRAM برای خرید",
+          label: "USDT داری",
           action: "buy"
         };
       }
@@ -1157,9 +1157,9 @@
         // mixed: prefer the larger side by equity share
         const gVal = s.totalGram * (live || s.avgBuyPrice || 0);
         if (gVal >= s.cashUsdt) {
-          return { mode: "hold_gram", label: "بیشتر GRAM داری — تمرکز روی فروش در اوج", action: "sell" };
+          return { mode: "hold_gram", label: "بیشتر GRAM داری", action: "sell" };
         }
-        return { mode: "hold_usdt", label: "بیشتر USDT داری — تمرکز روی خرید در کف", action: "buy" };
+        return { mode: "hold_usdt", label: "بیشتر USDT داری", action: "buy" };
       }
       return { mode: "empty", label: "پوزیشن خالی", action: null };
     }
@@ -1185,62 +1185,79 @@
       return true;
     }
 
-    /** Same advice as the UI card — appended to every Telegram message */
+    /** Clear last-swap advice for Telegram (matches approved copy) */
     function lastSwapAdviceBlock(s, price) {
       const lt = lastTrade();
       if (!lt || !(lt.price > 0)) return "";
       const ref = lt.price;
       const pad = 1 - ROUND / 100;
-      const levels = [0.5, 1, 1.5, 2, 3, 5];
-      let out = "\n\n💡 پیشنهاد بر اساس سواپ آخر";
+      const levels = [
+        { pct: 0.5, tag: "کمی" },
+        { pct: 1, tag: "بهتر" },
+        { pct: 2, tag: "خوب" },
+        { pct: 3, tag: "خیلی خوب" },
+        { pct: 5, tag: "عالی" }
+      ];
+      let out = "\n\nپیشنهاد:";
       if (lt.type === "buy") {
         const curPct = price ? ((price - ref) / ref) * 100 : null;
-        out += "\nآخرین سواپ: خرید GRAM @ " + fmt(ref, 4);
+        out += "\nآخرین خرید تو: " + fmt(ref, 4) + " USDT";
+        if (price) out += "\nقیمت الان:     " + fmt(price, 4) + " USDT";
         if (curPct != null) {
-          out += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? "سود " : "ضرر ") + Math.abs(curPct).toFixed(2) + "٪ نسبت به خرید";
+          out += "\nیعنی حدود " + (curPct >= 0 ? "+" : "−") + Math.abs(curPct).toFixed(2) + "٪ " + (curPct >= 0 ? "بالاتر" : "پایین‌تر") + " از خرید";
         }
-        if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی فروش را در نظر بگیری";
-        else out += "\nمنتظر رشد بالای اهداف فروش بمان";
-        out += "\nاهداف فروش:";
-        for (const pct of levels) {
+        if (s && s.totalGram > 0) out += "\n\nوضعیت تو: GRAM داری" + (s.cashUsdt > 0 ? (" (و " + fmt(s.cashUsdt, 2) + " USDT)") : "");
+        if (curPct != null && curPct >= MIN_ACTION_PCT) {
+          out += "\nاگر بفروشی، نسبت به خریدت در سودی (لغزش استخر را در نظر بگیر).";
+        } else {
+          out += "\nبرای فروش بهتر است صبر کنی تا نزدیک اهداف زیر برسد.";
+        }
+        out += "\n\nاهداف فروش پیشنهادی:";
+        for (const L of levels) {
           const slip = (s && s.totalGram > 0) ? estSlippagePct(s.totalGram) / 100 : 0;
-          const midNeed = (ref * (1 + pct / 100)) / Math.max(0.5, 1 - slip) / pad;
-          out += "\n• +" + pct + "٪ → mid ≈ " + fmt(midNeed, 4);
+          const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+          out += "\n• " + L.tag + " (+" + L.pct + "٪): حدود " + fmt(midNeed, 4);
         }
       } else {
-        const curPct = price ? ((ref - price) / ref) * 100 : null;
-        out += "\nآخرین سواپ: فروش GRAM @ " + fmt(ref, 4);
+        const curPct = price ? ((ref - price) / ref) * 100 : null; // + = cheaper than sell
+        out += "\nآخرین فروش تو: " + fmt(ref, 4) + " USDT";
+        if (price) out += "\nقیمت الان:     " + fmt(price, 4) + " USDT";
         if (curPct != null) {
-          out += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? curPct.toFixed(2) + "٪ ارزان‌تر از فروش" : Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش");
+          out += "\nیعنی حدود " + (curPct >= 0 ? "−" : "+") + Math.abs(curPct).toFixed(2) + "٪ " + (curPct >= 0 ? "ارزان‌تر" : "گران‌تر") + " از وقتی فروختی";
         }
-        if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی دوباره بخری";
-        else out += "\nمنتظر ریزش زیر اهداف خرید بمان";
-        out += "\nاهداف خرید:";
-        for (const pct of levels) {
-          const target = ref * (1 - pct / 100) * pad;
-          out += "\n• −" + pct + "٪ → زیر " + fmt(target, 4);
+        if (s) out += "\n\nوضعیت تو: " + (s.cashUsdt > 0 ? ("USDT داری (حدود " + fmt(s.cashUsdt, 2) + ")") : "USDT کمی داری");
+        if (s && s.totalGram > 1e-6) out += " · کمی هم GRAM داری";
+        if (curPct != null && curPct >= MIN_ACTION_PCT) {
+          out += "\nاگر دوباره بخری، نسبت به فروش قبلی‌ات جا برای سود داری.";
+        } else {
+          out += "\nعجله نکن. برای خرید دوباره بهتر است صبر کنی تا نزدیک اهداف پایین بیاید:";
+        }
+        out += "\n\nاهداف خرید پیشنهادی:";
+        for (const L of levels) {
+          const target = ref * (1 - L.pct / 100) * pad;
+          out += "\n• " + L.tag + " (−" + L.pct + "٪): حدود " + fmt(target, 4);
         }
       }
       return out;
     }
 
     function stanceLine(stance, s, price) {
-      let line = "📍 " + stance.label;
-      if (stance.mode === "hold_gram" && s.avgBuyPrice) {
-        const pct = price ? ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100 : null;
-        line += "\nمیانگین ورود: " + fmt(s.avgBuyPrice, 4);
-        if (pct != null) line += " · سود/زیان شناور: " + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "٪";
-        if (price && !sellIsWorthwhile(s, price)) line += "\n⚠️ هنوز نزدیک سربه‌سر — فروش الکی پیشنهاد نمی‌شود";
-      }
-      if (stance.mode === "hold_usdt") {
-        if (s.lastSwapType === "sell" && s.lastSwapPrice) {
-          line += "\nآخرین فروش: " + fmt(s.lastSwapPrice, 4);
+      // Keep short — detailed advice comes from lastSwapAdviceBlock
+      let line = "";
+      if (stance.mode === "hold_gram") {
+        line = "وضعیت تو: GRAM داری";
+        if (s.avgBuyPrice) {
+          line += "\nمیانگین ورود: " + fmt(s.avgBuyPrice, 4);
           if (price) {
-            const pct = ((s.lastSwapPrice - price) / s.lastSwapPrice) * 100;
-            line += " · فاصله از آن: " + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "٪ ارزان‌تر";
+            const pct = ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100;
+            line += "\nنسبت به ورود: " + (pct >= 0 ? "+" : "−") + Math.abs(pct).toFixed(2) + "٪";
           }
         }
-        line += "\nموجودی USDT: " + fmt(s.cashUsdt, 2);
+      } else if (stance.mode === "hold_usdt") {
+        line = "وضعیت تو: USDT داری" + (s.cashUsdt > 0 ? (" (حدود " + fmt(s.cashUsdt, 2) + ")") : "");
+        if (s.totalGram > 1e-6) line += "\nکمی هم GRAM داری: " + fmt(s.totalGram, 4);
+      } else {
+        line = "وضعیت تو: پوزیشن مشخصی نیست";
       }
       line += lastSwapAdviceBlock(s, price);
       return line;
@@ -1265,15 +1282,12 @@
       // --- fixed price thresholds (with stance context) ---
       if (above > 0 && live >= above && !recently("above")) {
         mark("above");
-        let msg = "🔺 GRAM به " + fmt(live, 4) + " رسید (سقف " + fmt(above, 4) + ")\n" + stanceLine(stance, state, live);
-        if (stance.action === "sell" && sellIsWorthwhile(state, live)) msg += "\n✅ الان بالای هدف — آماده فروش باش";
-        else if (stance.action === "sell") msg += "\nهنوز سود معنادار نسبت به ورود نداری";
+        let msg = "🔺 قیمت به سقف مورد نظرت رسید\n\nسقف تو: " + fmt(above, 4) + "\nقیمت الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live);
         sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
         sent = true;
       } else if (below > 0 && live <= below && !recently("below")) {
         mark("below");
-        let msg = "🔻 GRAM به " + fmt(live, 4) + " رسید (کف " + fmt(below, 4) + ")\n" + stanceLine(stance, state, live);
-        if (stance.action === "buy" && buyIsWorthwhile(state, live)) msg += "\n✅ قیمت پایین آمده — آماده خرید GRAM باش";
+        let msg = "🔻 قیمت به کف مورد نظرت رسید\n\nکف تو: " + fmt(below, 4) + "\nقیمت الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live);
         sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
         sent = true;
       }
@@ -1289,7 +1303,7 @@
             const key = "ls_profit_buy_" + targetPct;
             if (movePct >= targetPct && !recently(key)) {
               mark(key);
-              sendTelegram("✅ سود +" + targetPct + "٪ نسبت به خرید آخر\nخرید @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (" + (movePct >= 0 ? "+" : "") + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live) + "\nمی‌توانی فروش را در نظر بگیری")
+              sendTelegram("✅ نسبت به خریدت در سودی\n\nآخرین خرید تو: " + fmt(ref, 4) + " USDT\nقیمت الان:     " + fmt(live, 4) + " USDT\nیعنی حدود +" + movePct.toFixed(2) + "٪ بالاتر از خرید (هدف: +" + targetPct + "٪)\n\n" + stanceLine(stance, state, live))
                 .then(() => toast("هشدار سود ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
               sent = true;
               break;
@@ -1299,7 +1313,7 @@
             const key = "ls_loss_buy_" + lossPct;
             if (movePct <= -lossPct && !recently(key)) {
               mark(key);
-              sendTelegram("⚠️ ضرر −" + lossPct + "٪ نسبت به خرید آخر\nخرید @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (" + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live))
+              sendTelegram("⚠️ نسبت به خریدت کمی عقب افتادی\n\nآخرین خرید تو: " + fmt(ref, 4) + " USDT\nقیمت الان:     " + fmt(live, 4) + " USDT\nیعنی حدود " + movePct.toFixed(2) + "٪ پایین‌تر از خرید (آستانه: −" + lossPct + "٪)\n\nاین ضرری است که هنوز قطعی نشده مگر بفروشی.\n\n" + stanceLine(stance, state, live))
                 .then(() => toast("هشدار ضرر ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
               sent = true;
               break;
@@ -1311,7 +1325,7 @@
             const key = "ls_profit_sell_" + targetPct;
             if (movePct <= -targetPct && !recently(key)) {
               mark(key);
-              sendTelegram("✅ فرصت خرید: −" + targetPct + "٪ زیر فروش آخر\nفروش @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (" + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live) + "\nمی‌توانی دوباره GRAM بخری")
+              sendTelegram("✅ فرصت خرید نزدیک است\n\nآخرین فروش تو: " + fmt(ref, 4) + " USDT\nقیمت الان:     " + fmt(live, 4) + " USDT\nیعنی حدود " + movePct.toFixed(2) + "٪ نسبت به فروش (هدف: −" + targetPct + "٪)\n\n" + stanceLine(stance, state, live))
                 .then(() => toast("هشدار فرصت خرید")).catch(() => toast("هشدار ارسال نشد"));
               sent = true;
               break;
@@ -1321,7 +1335,7 @@
             const key = "ls_loss_sell_" + lossPct;
             if (movePct >= lossPct && !recently(key)) {
               mark(key);
-              sendTelegram("⚠️ قیمت +" + lossPct + "٪ بالای فروش آخر رفت\nفروش @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (+" + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live) + "\nاگر هنوز USDT داری، عجله نکن — صبر برای اصلاح")
+              sendTelegram("⚠️ بعد از فروش تو، قیمت کمی بالا رفت\n\nآخرین فروش تو: " + fmt(ref, 4) + " USDT\nقیمت الان:     " + fmt(live, 4) + " USDT\nیعنی حدود +" + movePct.toFixed(2) + "٪ گران‌تر از وقتی فروختی (آستانه: +" + lossPct + "٪)\n\nعجله نکن — برای خرید دوباره صبر کن.\n\n" + stanceLine(stance, state, live))
                 .then(() => toast("هشدار رشد بعد از فروش")).catch(() => toast("هشدار ارسال نشد"));
               sent = true;
               break;
@@ -1335,7 +1349,7 @@
       if (mom.dir === "up" && stance.action === "sell" && !recently("mom_up_sell", coolMom)) {
         if (sellIsWorthwhile(state, live)) {
           mark("mom_up_sell");
-          const msg = "📈 GRAM در حال رشد است (+" + fmt(Math.abs(mom.delta), 4) + " از " + fmt(mom.from, 4) + ")\nقیمت الان: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\n🟢 آماده‌باش فروش — اگر رشد ادامه داشت می‌توانی نزدیک اوج بفروشی";
+          const msg = "📈 قیمت در حال بالا رفتن است\n\nاز " + fmt(mom.from, 4) + " به " + fmt(live, 4) + " (حدود +" + fmt(Math.abs(mom.delta), 4) + ")\n\n" + stanceLine(stance, state, live);
           sendTelegram(msg).then(() => toast("هشدار روند صعودی")).catch(() => {});
           sent = true;
         }
@@ -1346,12 +1360,7 @@
         const nAbs = mom.noise || noiseAbs(live);
         if (drop >= nAbs) {
           mark("mom_down_sell");
-          let msg = "📉 GRAM در حال ریزش است (−" + fmt(drop, 4) + " از " + fmt(mom.from, 4) + ")\nقیمت mid DEX: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live);
-          if (sellIsWorthwhile(state, live)) {
-            msg += "\n🟠 بعد از تخمین لغزش هنوز در سود هستی — اگر ریزش ادامه دارد بفروش";
-          } else {
-            msg += "\nنزدیک سربه‌سر (با لغزش) — فروش فقط برای بستن ریسک";
-          }
+          let msg = "📉 قیمت در حال پایین آمدن است\n\nاز " + fmt(mom.from, 4) + " به " + fmt(live, 4) + " (حدود −" + fmt(drop, 4) + ")\n\n" + stanceLine(stance, state, live);
           sendTelegram(msg).then(() => toast("هشدار روند نزولی")).catch(() => {});
           sent = true;
         }
@@ -1361,7 +1370,7 @@
         const nAbs = mom.noise || noiseAbs(live);
         if (drop >= nAbs && buyIsWorthwhile(state, live)) {
           mark("mom_down_buy");
-          const msg = "📉 GRAM ریزش کرده (−" + fmt(drop, 4) + " از " + fmt(mom.from, 4) + ")\nقیمت mid DEX: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\n🟢 فرصت خرید نزدیک است";
+          const msg = "📉 قیمت پایین آمده\n\nاز " + fmt(mom.from, 4) + " به " + fmt(live, 4) + " (حدود −" + fmt(drop, 4) + ")\n\n" + stanceLine(stance, state, live);
           sendTelegram(msg).then(() => toast("هشدار فرصت خرید")).catch(() => {});
           sent = true;
         }
@@ -1373,7 +1382,7 @@
           const chasing = ref != null && live > ref + nAbs;
           if (!chasing) {
             mark("mom_up_buy");
-            const msg = "📈 GRAM بعد از ضعف دوباره رشد می‌کند (+" + fmt(Math.abs(mom.delta), 4) + ")\nقیمت mid DEX: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\n🟢 وقت خرید است — قبل از رشد بیشتر";
+            const msg = "📈 قیمت بعد از ضعف دوباره بالا می‌آید\n\nحرکت حدود +" + fmt(Math.abs(mom.delta), 4) + "\nقیمت الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live);
             sendTelegram(msg).then(() => toast("هشدار خرید روی برگشت")).catch(() => {});
             sent = true;
           }
@@ -1385,24 +1394,13 @@
 
     function buildStatusMessage(s) {
       const stance = positionStance(s);
-      const series = (() => { try { return JSON.parse(localStorage.getItem(SERIESKEY) || "[]"); } catch { return []; } })();
-      const mom = detectMomentum(series);
-      const pnlPct = s.investedUsdt > 0 ? (s.unrealizedPnl / s.investedUsdt) * 100 : null;
-      let msg = "📊 وضعیت GRAM\nقیمت: " + fmt(live, 4) + " USDT";
-      if (mom.dir === "up") msg += "\nروند کوتاه: صعودی (+" + fmt(Math.abs(mom.delta), 4) + ")";
-      else if (mom.dir === "down") msg += "\nروند کوتاه: نزولی (−" + fmt(Math.abs(mom.delta), 4) + ")";
-      else msg += "\nروند کوتاه: خنثی (زیر آستانه نویز ~" + fmt(noiseAbs(live), 4) + ")";
-      msg += "\n" + stanceLine(stance, s, live);
-      if (s.totalGram > 0) msg += "\nموجودی: " + fmt(s.totalGram, 4) + " GRAM";
-      if (s.cashUsdt > 0) msg += "\nUSDT: " + fmt(s.cashUsdt, 2);
-      if (s.equity != null && live) msg += "\nارزش کل: " + fmt(s.equity, 2);
-      if (pnlPct != null) msg += "\nسود شناور: " + (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "٪";
-      msg += "\nسود/زیان کل: " + (s.totalPnl >= 0 ? "+" : "") + fmt(s.totalPnl, 2);
+      let msg = "📊 وضعیت الان\n\nقیمت: " + fmt(live, 4) + " USDT";
+      if (quote && quote.source) msg += " (" + quote.source + ")";
+      if (s.totalGram > 0) msg += "\nموجودی GRAM: " + fmt(s.totalGram, 4);
+      if (s.cashUsdt > 0) msg += "\nموجودی USDT: " + fmt(s.cashUsdt, 2);
+      if (s.equity) msg += "\nارزش تقریبی کل: " + fmt(s.equity, 2) + " USDT";
+      msg += "\n\n" + stanceLine(stance, s, live);
       return msg;
-    }
-
-    function stat(label, value, hint, klass) {
-      return '<div class="card" style="padding:14px"><p class="muted" style="margin:0">' + label + '</p><p class="stat-v ' + (klass || "") + '">' + value + '</p>' + (hint ? '<p class="muted" style="margin:2px 0 0">' + hint + "</p>" : "") + "</div>";
     }
 
     function render() {
