@@ -933,20 +933,16 @@
 
     async function fetchJson(url, ms) {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), ms || 8000);
+      const timer = setTimeout(() => ctrl.abort(), ms || 6000);
       try {
         const res = await fetch(url, { signal: ctrl.signal, headers: { accept: "application/json" } });
-        if (!res.ok) {
-          let extra = "";
-          try { const t = await res.text(); extra = t.slice(0, 120); } catch (_) {}
-          throw new Error("HTTP " + res.status + (extra ? (" " + extra) : ""));
-        }
+        if (!res.ok) throw new Error("HTTP " + res.status);
         return await res.json();
       } finally { clearTimeout(timer); }
     }
 
     async function fromKraken() {
-      const j = await fetchJson("https://api.kraken.com/0/public/Ticker?pair=TONUSD");
+      const j = await fetchJson("https://api.kraken.com/0/public/Ticker?pair=TONUSD", 7000);
       const row = j.result && j.result.TONUSD;
       const last = Number(row && row.c && row.c[0]);
       const open = Number(row && row.o);
@@ -966,7 +962,7 @@
       return { usd, change24h: change, source: "Coinbase" };
     }
     async function fromSton() {
-      const j = await fetchJson("https://api.ston.fi/v1/pools/" + STON);
+      const j = await fetchJson("https://api.ston.fi/v1/pools/" + STON, 7000);
       const pool = j.pool || j;
       const r0 = Number(pool.reserve0), r1 = Number(pool.reserve1);
       if (!r0 || !r1) throw new Error("ston");
@@ -989,34 +985,38 @@
 
     async function getPrice(force) {
       const now = Date.now();
+      // cache 45s — like the first version
       try {
         const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
-        if (!force && cached && cached.q && now - cached.at < 45000 && cached.q.usd) {
-          quote = { ...cached.q, cached: true, stale: false };
+        if (!force && cached && cached.q && cached.q.usd && now - cached.at < 45000) {
+          quote = Object.assign({}, cached.q, { cached: true, stale: false });
           live = quote.usd;
-          dexPrice = quote.dexUsd != null ? quote.dexUsd : dexPrice;
-          cexPrice = quote.cexUsd != null ? quote.cexUsd : cexPrice;
-          pushPriceSample(live);
+          if (quote.dexUsd != null) dexPrice = quote.dexUsd;
+          if (quote.cexUsd != null) cexPrice = quote.cexUsd;
           return quote;
         }
       } catch (_) {}
 
-      // Parallel fetch — first working source wins; DEX preferred for mid
-      const tryOne = async (fn) => { try { return await fn(); } catch (_) { return null; } };
-      const [dex, k, c, l, g] = await Promise.all([
-        tryOne(fromSton),
-        tryOne(fromKraken),
-        tryOne(fromCoinbase),
-        tryOne(fromLlama),
-        tryOne(fromGecko)
-      ]);
-      const cex = k || c || l || g || null;
+      // Original simple path: DEX first, then one CEX — stop as soon as we have a price
+      let dex = null, cex = null;
+      try { dex = await fromSton(); } catch (_) {}
+      if (!dex) {
+        try { cex = await fromKraken(); } catch (_) {}
+      } else {
+        // optional CEX for comparison — don't block decision price
+        try { cex = await fromKraken(); } catch (_) {
+          try { cex = await fromCoinbase(); } catch (_) {}
+        }
+      }
+      if (!cex && !dex) {
+        try { cex = await fromCoinbase(); } catch (_) {}
+      }
 
       if (!dex && !cex) {
         try {
           const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
           if (cached && cached.q && cached.q.usd) {
-            quote = { ...cached.q, cached: true, stale: true };
+            quote = Object.assign({}, cached.q, { cached: true, stale: true });
             live = quote.usd;
             return quote;
           }
@@ -1024,24 +1024,21 @@
         throw new Error("no price");
       }
 
+      const primary = dex || cex;
       dexPrice = dex ? dex.usd : null;
       cexPrice = cex ? cex.usd : null;
-      const primary = dex || cex;
-      const spread = (dexPrice && cexPrice) ? (dexPrice - cexPrice) : null;
       quote = {
         usd: primary.usd,
-        change24h: (cex && cex.change24h != null) ? cex.change24h : (primary.change24h != null ? primary.change24h : null),
-        source: dex ? ("DEX " + (dex.source || "STON")) : primary.source,
+        change24h: cex && cex.change24h != null ? cex.change24h : null,
+        source: dex ? "STON.fi DEX" : primary.source,
         dexUsd: dexPrice,
         cexUsd: cexPrice,
-        spread,
         cached: false,
-        stale: false,
-        at: now
+        stale: false
       };
       live = quote.usd;
       try { localStorage.setItem(PKEY, JSON.stringify({ at: now, q: quote })); } catch (_) {}
-      pushPriceSample(live);
+      try { pushPriceSample(live); } catch (_) {}
       return quote;
     }
 
@@ -1679,24 +1676,19 @@
     }
 
     async function refreshPrice(force) {
-      if (fetching) {
-        if (refreshPrice._since && Date.now() - refreshPrice._since < 8000) return;
-        fetching = false; // recover from stuck state
-      }
+      if (fetching) return;
       fetching = true;
-      refreshPrice._since = Date.now();
       const btn = document.getElementById("btnPrice");
       if (btn) btn.disabled = true;
-      const meta = document.getElementById("priceMeta");
-      if (meta && live == null) meta.textContent = "در حال اتصال به بازار…";
       try {
         await getPrice(!!force);
         render();
-      } catch (err) {
-        console.error(err);
-        document.getElementById("livePrice").textContent = "—";
-        if (meta) meta.textContent = "خطا در اتصال · دکمه «به‌روز کردن قیمت» را بزن";
-        toast("قیمت گرفته نشد");
+      } catch (e) {
+        console.error(e);
+        const el = document.getElementById("livePrice");
+        const meta = document.getElementById("priceMeta");
+        if (el) el.textContent = "—";
+        if (meta) meta.textContent = "خطا در اتصال · دوباره تلاش کن";
       } finally {
         fetching = false;
         if (btn) btn.disabled = false;
@@ -1752,7 +1744,7 @@
       };
       r.readAsText(f); e.target.value = "";
     };
-    document.getElementById("btnPrice").onclick = () => { refreshPrice(true); refreshChart(); };
+    document.getElementById("btnPrice").onclick = () => { refreshPrice(true); };
     document.getElementById("btnSyncWallet").onclick = () => syncWallet(true);
     document.getElementById("btnSyncNow").onclick = () => syncWallet(true);
     document.getElementById("walletAddr").onchange = () => {
@@ -1780,9 +1772,8 @@
     bindTg();
     render();
     refreshPrice(false);
-    refreshChart();
-    // auto-sync wallet on load (once)
-    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 1200);
+    setTimeout(() => { refreshChart(); }, 500);
+    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 1500);
     setInterval(() => refreshPrice(false), 45000);
     // auto re-sync wallet every 10 minutes
     setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
