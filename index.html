@@ -260,12 +260,22 @@
         <div class="sec-head" style="margin-bottom:6px">
           <div>
             <h2 class="sec-title"><span class="step">۴</span> الان چه کار کنم؟</h2>
-            <p class="help">پیشنهاد بر اساس آخرین سواپی که انجام دادی و قیمت فعلی بازار.</p>
+            <p class="help">پیشنهاد، اهداف قیمت و شبیه‌ساز فروش — همه بر اساس سواپ آخر و موجودی فعلی.</p>
           </div>
         </div>
         <p id="adviceText" style="margin:0;font-weight:700;font-size:1.05rem;line-height:1.75"></p>
         <p class="muted" id="adviceMeta" style="margin:8px 0 0"></p>
         <div id="adviceTargets" style="display:grid;gap:8px;margin-top:12px"></div>
+        <div id="targets" class="hidden"></div>
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <p style="margin:0 0 8px;font-weight:700;font-size:0.95rem">شبیه‌ساز فروش (اگر GRAM داری)</p>
+          <p class="help" style="margin:0 0 10px">یک قیمت فرضی بگذار تا ببینی بعد از لغزش حدوداً چقدر USDT می‌گیری.</p>
+          <div class="row" style="align-items:flex-end">
+            <div style="flex:1;min-width:160px"><label>قیمت فرضی (mid)</label><input id="simPrice" inputmode="decimal" placeholder="1.55" /></div>
+            <button class="btn btn-primary" id="btnSim" type="button" style="width:auto;padding-inline:20px">محاسبه</button>
+          </div>
+          <div class="sim hidden" id="simOut"></div>
+        </div>
       </section>
 
       <!-- Chart -->
@@ -382,29 +392,11 @@
       </details>
 
       <!-- Advanced: Targets + Sim -->
-      <details class="adv">
-        <summary>
-          <span>اهداف سود و شبیه‌ساز فروش
-            <span class="summary-sub">ببین اگر با قیمت X بفروشی چقدر می‌گیری</span>
-          </span>
-        </summary>
-        <div class="adv-body">
-          <h2 style="margin:0 0 8px;font-size:0.95rem">اهداف سود تقریبی</h2>
-          <p class="help" style="margin-top:0">این اعداد mid تقریبی‌اند و لغزش استخر را هم در نظر می‌گیرند.</p>
-          <div id="targets" style="display:grid;gap:8px;margin-bottom:18px"></div>
-          <h2 style="margin:0 0 8px;font-size:0.95rem">شبیه‌ساز فروش GRAM → USDT</h2>
-          <div class="row" style="align-items:flex-end">
-            <div style="flex:1;min-width:160px"><label>قیمت فرضی (mid)</label><input id="simPrice" inputmode="decimal" placeholder="1.55" /></div>
-            <button class="btn btn-primary" id="btnSim" type="button" style="width:auto;padding-inline:20px">محاسبه</button>
-          </div>
-          <div class="sim hidden" id="simOut"></div>
-        </div>
-      </details>
-    </div>
+      </div>
 
     <footer>
-      قیمت تصمیم از استخر STON.fi · موجودی و سواپ از tonapi.io<br>
-      داده فقط روی همین مرورگر ذخیره می‌شود · کلید خصوصی لازم نیست
+      راهنمای تصمیم است، نه سیگنال قطعی سود · قیمت mid استخر STON.fi · موجودی از زنجیره<br>
+      تاریخچه محدود به eventهای خوانده‌شده · هشدار مرورگر فقط با صفحه باز · داده فقط روی همین مرورگر
     </footer>
   </div>
 
@@ -603,7 +595,7 @@
     }
     /** Paginate tonapi events until maxPages or no next_from */
     async function fetchWalletSwaps(addr, maxPages) {
-      const pages = maxPages || 8;
+      const pages = maxPages || 15;
       let all = [], nextFrom = null;
       for (let i = 0; i < pages; i++) {
         let url = "https://tonapi.io/v2/accounts/" + encodeURIComponent(addr) + "/events?limit=100";
@@ -642,7 +634,7 @@
       try {
         let bal = null;
         try { bal = await fetchWalletBalances(addr); } catch (_) {}
-        const remote = await fetchWalletSwaps(addr, 8);
+        const remote = await fetchWalletSwaps(addr, 15);
         if (!remote.length) {
           meta.textContent = bal
             ? ("سواپی یافت نشد · زنجیره: " + fmt(bal.ton, 4) + " GRAM · " + fmt(bal.usdt, 2) + " USDT")
@@ -1467,9 +1459,14 @@
       const balLine = document.getElementById("walletBalLine");
       if (balLine) {
         if (walletBal) {
-          let txt = "✓ موجودی مستقیم از کیف‌پول: " + fmt(walletBal.ton, 4) + " GRAM · " + fmt(walletBal.usdt, 2) + " USDT";
-          if (s.bookGram != null && Math.abs(s.bookGram - walletBal.ton) > 0.5) {
-            txt += " · دفتر سواپ‌ها: " + fmt(s.bookGram, 4) + " GRAM (اختلاف از واریز/برداشت غیرسواپ)";
+          let txt = "✓ موجودی کیف‌پول: " + fmt(walletBal.ton, 4) + " GRAM · " + fmt(walletBal.usdt, 2) + " USDT";
+          if (s.bookGram != null) {
+            const d = Math.abs(s.bookGram - walletBal.ton);
+            if (d > 0.5) {
+              txt += " · ⚠️ دفتر سواپ‌ها " + fmt(s.bookGram, 4) + " GRAM (اختلاف " + fmt(d, 4) + " — واریز/برداشت غیرسواپ یا تاریخچه ناقص)";
+            } else {
+              txt += " · دفتر سواپ با زنجیره هم‌خوان";
+            }
           }
           balLine.textContent = txt;
         } else {
