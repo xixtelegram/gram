@@ -139,7 +139,49 @@
     .empty { text-align: center; color: var(--muted); padding: 32px 8px; font-size: 14px; }
     .sim { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; text-align: center; margin-top: 14px; }
     .sim b { display: block; font-size: 1.1rem; font-variant-numeric: tabular-nums; }
-    footer { text-align: center; margin-top: 28px; color: var(--muted); font-size: 12px; }
+    footer { text-align: center; margin-top: 28px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+    .sec { margin-bottom: 18px; }
+    .sec-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+    .sec-title { margin:0; font-size:1rem; font-weight:800; display:flex; align-items:center; gap:8px; }
+    .step {
+      width:24px; height:24px; border-radius:8px; flex:none;
+      background: rgba(20,184,166,.18); color: var(--primary);
+      font-size:12px; font-weight:800; display:grid; place-items:center;
+    }
+    .help { margin:4px 0 0; font-size:12.5px; color: var(--muted); line-height:1.65; max-width:52ch; }
+    .callout {
+      background: rgba(20,184,166,.08); border:1px solid rgba(20,184,166,.28);
+      border-radius:14px; padding:12px 14px; font-size:13px; line-height:1.7; margin-top:12px;
+    }
+    .callout.warn { background: rgba(245,158,11,.08); border-color: rgba(245,158,11,.35); color:#fbbf24; }
+    .callout.info { background: rgba(59,130,246,.08); border-color: rgba(59,130,246,.28); }
+    .empty-state {
+      text-align:center; padding:28px 16px; border:1px dashed var(--border);
+      border-radius: var(--radius); background: var(--surface-2);
+    }
+    .empty-state h3 { margin:0 0 8px; font-size:1.05rem; }
+    .empty-state p { margin:0 auto; max-width:36ch; color: var(--muted); font-size:13px; line-height:1.7; }
+    .badge { width:auto; min-width:72px; height:auto; padding:8px 10px; border-radius:10px; display:grid; place-items:center; font-size:11px; font-weight:800; line-height:1.3; text-align:center; }
+    .hist { display:grid; grid-template-columns: auto 1fr auto; gap:12px; align-items:start; }
+    details.adv {
+      background: var(--surface); border:1px solid var(--border); border-radius: var(--radius);
+      margin-bottom:18px; overflow:hidden;
+    }
+    details.adv > summary {
+      list-style:none; cursor:pointer; padding:16px 18px; font-weight:800; font-size:0.98rem;
+      display:flex; align-items:center; justify-content:space-between; gap:10px; user-select:none;
+    }
+    details.adv > summary::-webkit-details-marker { display:none; }
+    details.adv > summary::after { content:"▼"; font-size:11px; color:var(--muted); transition:.2s; }
+    details.adv[open] > summary::after { transform:rotate(-180deg); }
+    details.adv .adv-body { padding:0 18px 18px; border-top:1px solid var(--border); padding-top:14px; }
+    .summary-sub { font-weight:500; font-size:12px; color:var(--muted); display:block; margin-top:4px; }
+    .price-row { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
+    .top-actions { display:flex; flex-wrap:wrap; gap:8px; }
+    @media (max-width: 640px) {
+      .hist { grid-template-columns: 1fr; }
+      .badge { justify-self:start; }
+    }
   </style>
 </head>
 <body>
@@ -151,167 +193,222 @@
         </div>
         <div>
           <h1>GRAM Swap</h1>
-          <p class="sub">پیگیری سود/زیان سواپ‌های GRAM ↔ USDT</p>
+          <p class="sub">پیگیری سادهٔ سود و زیان سواپ GRAM ↔ USDT</p>
         </div>
       </div>
-      <div class="row">
-        <button class="btn btn-ghost" id="btnPrice" type="button">به‌روز کردن قیمت</button>
-        <button class="btn btn-ghost" id="btnSyncWallet" type="button" title="خواندن سواپ‌ها از کیف‌پول TON">همگام‌سازی کیف‌پول</button>
-        <button class="btn btn-ghost" id="btnExport" type="button">خروجی</button>
-        <label class="btn btn-ghost" style="margin:0">
+      <div class="top-actions">
+        <button class="btn btn-ghost" id="btnPrice" type="button" title="قیمت را از بازار دوباره بخوان">به‌روز کردن قیمت</button>
+        <button class="btn btn-ghost" id="btnExport" type="button" title="پشتیبان‌گیری از داده‌ها">خروجی</button>
+        <label class="btn btn-ghost" style="margin:0" title="بازیابی از فایل JSON">
           ورود
           <input id="importFile" type="file" accept=".json" hidden />
         </label>
       </div>
     </header>
 
-    <section class="card" style="margin-bottom:16px" id="walletCard">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
-        <div style="flex:1;min-width:200px">
-          <h2 style="margin:0 0 8px">کیف‌پول TON</h2>
-          <p class="muted" style="margin:0">سواپ‌های GRAM ↔ USDT به‌صورت خودکار از تاریخچهٔ زنجیره خوانده می‌شوند</p>
+    <!-- STEP 1: Wallet -->
+    <section class="card sec" id="walletCard">
+      <div class="sec-head">
+        <div>
+          <h2 class="sec-title"><span class="step">۱</span> اتصال کیف‌پول</h2>
+          <p class="help">آدرس عمومی کیف‌پول TON خودت را بگذار. اپ فقط تاریخچهٔ عمومی را می‌خواند و به کلید خصوصی نیاز ندارد.</p>
         </div>
-        <button class="btn btn-ghost" id="btnWalletSettings" type="button" style="height:36px;font-size:12px">تنظیم آدرس</button>
       </div>
-      <div style="margin-top:12px">
-        <label>آدرس کیف‌پول</label>
-        <input id="walletAddr" placeholder="EQC..." style="font-family:monospace;font-size:13px" dir="ltr" />
+      <div>
+        <label for="walletAddr">آدرس کیف‌پول (با EQ یا UQ شروع می‌شود)</label>
+        <input id="walletAddr" placeholder="مثلاً EQC..." style="font-family:monospace;font-size:13px" dir="ltr" autocomplete="off" />
       </div>
-      <div class="row" style="margin-top:10px;align-items:center">
-        <button class="btn btn-primary" id="btnSyncNow" type="button" style="width:auto;padding-inline:18px">همگام‌سازی الان</button>
+      <div class="row" style="margin-top:12px;align-items:center">
+        <button class="btn btn-primary" id="btnSyncNow" type="button" style="width:auto;padding-inline:20px">خواندن از کیف‌پول</button>
+        <button class="btn btn-ghost" id="btnSyncWallet" type="button" style="width:auto;padding-inline:14px">همگام‌سازی دوباره</button>
         <span class="muted" id="walletSyncMeta" style="font-size:12px"></span>
       </div>
-      <p class="muted" id="walletBalLine" style="margin:10px 0 0;font-size:12px"></p>
-    </section>
-
-    <section class="card" style="margin-bottom:16px">
-      <p class="muted" style="margin:0">قیمت mid DEX (مبناى تصمیم)</p>
-      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
-        <p class="price" id="livePrice">…</p>
-        <span class="pill hidden" id="chgPill"></span>
+      <p class="muted" id="walletBalLine" style="margin:12px 0 0;font-size:13px;line-height:1.65"></p>
+      <div class="callout info" id="walletHint">
+        بعد از وارد کردن آدرس، روی «خواندن از کیف‌پول» بزن تا موجودی و سواپ‌ها از بلاکچین لود شوند.
       </div>
-      <p class="muted" id="priceMeta" style="margin:8px 0 0">در حال اتصال به بازار…</p>
     </section>
 
-    <div class="stats" id="stats1"></div>
-    <div class="stats three" id="stats2"></div>
-
-    <section class="card" id="adviceBox" style="margin-bottom:22px;border-color:rgba(20,184,166,.35)">
-      <p class="muted" style="margin:0">پیشنهاد بر اساس سواپ آخر</p>
-      <p id="adviceText" style="margin:8px 0 0;font-weight:700;font-size:1.05rem;line-height:1.7"></p>
-      <p class="muted" id="adviceMeta" style="margin:8px 0 0"></p>
-      <div id="adviceTargets" style="display:grid;gap:8px;margin-top:12px"></div>
-    </section>
-
-    <section class="card" style="margin-bottom:22px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-        <h2 style="margin:0">نمودار قیمت</h2>
-        <div class="chart-btns" id="chartDays">
-          <button class="btn btn-ghost" data-d="1" type="button">۱ روز</button>
-          <button class="btn btn-ghost on" data-d="7" type="button">۷ روز</button>
-          <button class="btn btn-ghost" data-d="30" type="button">۳۰ روز</button>
+    <div id="mainApp">
+      <!-- Price -->
+      <section class="card sec">
+        <div class="sec-head">
+          <div>
+            <h2 class="sec-title"><span class="step">۲</span> قیمت الان</h2>
+            <p class="help">قیمت از استخر واقعی DEX خوانده می‌شود (نزدیک‌ترین قیمت به سواپ تو). قیمت صرافی فقط برای مقایسه است.</p>
+          </div>
         </div>
-      </div>
-      <div class="chart-box"><canvas id="chart"></canvas></div>
-      <p class="muted" id="chartMeta" style="margin:8px 0 0"></p>
-    </section>
+        <div class="price-row">
+          <p class="price" id="livePrice">…</p>
+          <span class="pill hidden" id="chgPill"></span>
+        </div>
+        <p class="muted" id="priceMeta" style="margin:8px 0 0">در حال اتصال به بازار…</p>
+      </section>
 
-    <section class="card" style="margin-bottom:22px">
-      <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+      <!-- Portfolio -->
+      <div class="sec-head" style="margin-bottom:8px">
         <div>
-          <h2>هشدار تلگرام</h2>
-          <p class="muted" style="margin:0">از BotFather توکن بگیر، به ربات /start بزن، Chat ID را از @userinfobot بردار.</p>
-          <p class="muted" style="margin:6px 0 0;color:#f59e0b">⚠️ این هشدار فقط وقتی صفحه باز است کار می‌کند. برای هشدار با مرورگر بسته از GitHub Action در پوشه <code>.github/workflows/</code> استفاده کن.</p>
-        </div>
-        <label class="switch" title="فعال">
-          <input id="tgEnabled" type="checkbox" />
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="grid2" style="margin-top:14px">
-        <div><label>توکن ربات</label><input id="tgToken" type="password" autocomplete="off" placeholder="123456:ABC..." /></div>
-        <div><label>Chat ID</label><input id="tgChat" placeholder="مثلاً 123456789" /></div>
-        <div><label>هشدار اگر قیمت بالاتر از</label><input id="tgAbove" inputmode="decimal" placeholder="1.60" /></div>
-        <div><label>هشدار اگر قیمت پایین‌تر از</label><input id="tgBelow" inputmode="decimal" placeholder="1.40" /></div>
-      </div>
-      <div style="margin-top:14px">
-        <label>هشدار سود نسبت به سواپ آخر (٪)</label>
-        <p class="muted" style="margin:0 0 6px;font-size:11px">اگر آخرین سواپ خرید GRAM بوده → رشد قیمت؛ اگر فروش بوده → فرصت خرید ارزان‌تر</p>
-        <div id="profitPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px"></div>
-        <div class="row" style="align-items:flex-end">
-          <div style="flex:1;min-width:100px"><input id="tgPctAdd" inputmode="decimal" placeholder="مثلاً ۱.۵" /></div>
-          <button class="btn btn-ghost" id="btnAddProfitPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
+          <h2 class="sec-title"><span class="step">۳</span> موجودی و سود/زیان</h2>
+          <p class="help">موجودی مستقیماً از کیف‌پول است. سود/زیان از روی سواپ‌های واقعی حساب می‌شود.</p>
         </div>
       </div>
-      <div style="margin-top:14px">
-        <label>هشدار ضرر نسبت به سواپ آخر (٪)</label>
-        <p class="muted" style="margin:0 0 6px;font-size:11px">اگر خرید بوده → افت زیر قیمت خرید؛ اگر فروش بوده → رشد دوباره بالای قیمت فروش</p>
-        <div id="lossPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px"></div>
-        <div class="row" style="align-items:flex-end">
-          <div style="flex:1;min-width:100px"><input id="tgLossAdd" inputmode="decimal" placeholder="مثلاً ۱" /></div>
-          <button class="btn btn-ghost" id="btnAddLossPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
-        </div>
-      </div>
-      <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-        <div>
-          <p style="margin:0;font-size:13px;font-weight:600">گزارش قیمت هر ۳۰ دقیقه</p>
-          <p class="muted" style="margin:2px 0 0">قیمت را هر نیم‌ساعت می‌گیرد و در تلگرام می‌فرستد</p>
-        </div>
-        <label class="switch" title="فعال">
-          <input id="tgPriceReport" type="checkbox" />
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="row" style="margin-top:12px">
-        <button class="btn btn-ghost" id="btnTgTest" type="button">پیام تست</button>
-      </div>
-    </section>
+      <div class="stats" id="stats1"></div>
+      <div class="stats three" id="stats2"></div>
 
-    <section style="margin-bottom:22px">
-      <h2>ثبت سواپ</h2>
-      <div class="card">
-        <div class="seg">
-          <button id="typeBuy" class="on-buy" type="button">سواپ به GRAM</button>
-          <button id="typeSell" type="button">سواپ به USDT</button>
+      <!-- Advice -->
+      <section class="card sec" id="adviceBox" style="border-color:rgba(20,184,166,.4)">
+        <div class="sec-head" style="margin-bottom:6px">
+          <div>
+            <h2 class="sec-title"><span class="step">۴</span> الان چه کار کنم؟</h2>
+            <p class="help">پیشنهاد بر اساس آخرین سواپی که انجام دادی و قیمت فعلی بازار.</p>
+          </div>
         </div>
-        <div class="grid2">
-          <div><label>تاریخ و ساعت</label><input id="tDate" type="datetime-local" /></div>
-          <div><label id="gramLbl">GRAM دریافتی</label><input id="tGram" inputmode="decimal" placeholder="70.40" /></div>
-          <div style="grid-column:1/-1"><label id="usdtLbl">USDT پرداختی</label><input id="tUsdt" inputmode="decimal" placeholder="106.06" /></div>
+        <p id="adviceText" style="margin:0;font-weight:700;font-size:1.05rem;line-height:1.75"></p>
+        <p class="muted" id="adviceMeta" style="margin:8px 0 0"></p>
+        <div id="adviceTargets" style="display:grid;gap:8px;margin-top:12px"></div>
+      </section>
+
+      <!-- Chart -->
+      <section class="card sec">
+        <div class="sec-head">
+          <div>
+            <h2 class="sec-title">نمودار قیمت</h2>
+            <p class="help">روند قیمت در چند روز اخیر — فقط برای دیدن تصویر کلی.</p>
+          </div>
+          <div class="chart-btns" id="chartDays">
+            <button class="btn btn-ghost" data-d="1" type="button">۱ روز</button>
+            <button class="btn btn-ghost on" data-d="7" type="button">۷ روز</button>
+            <button class="btn btn-ghost" data-d="30" type="button">۳۰ روز</button>
+          </div>
         </div>
-        <p class="muted" id="autoFeeHint" style="margin:12px 0 0">کارمزد خودکار</p>
-        <button class="btn btn-primary" id="btnSave" type="button" style="margin-top:12px">ذخیره سواپ</button>
-      </div>
-    </section>
+        <div class="chart-box"><canvas id="chart"></canvas></div>
+        <p class="muted" id="chartMeta" style="margin:8px 0 0"></p>
+      </section>
 
-    <section style="margin-bottom:22px">
-      <h2>اهداف سود سواپ</h2>
-      <div class="card" id="targets" style="display:grid;gap:8px;padding:12px"></div>
-    </section>
-
-    <section style="margin-bottom:22px">
-      <h2>شبیه‌ساز سواپ به USDT</h2>
-      <div class="card">
-        <div class="row" style="align-items:flex-end">
-          <div style="flex:1;min-width:160px"><label>قیمت فرضی سواپ</label><input id="simPrice" inputmode="decimal" placeholder="1.55" /></div>
-          <button class="btn btn-primary" id="btnSim" type="button" style="width:auto;padding-inline:20px">محاسبه</button>
+      <!-- History -->
+      <section class="sec">
+        <div class="sec-head">
+          <div>
+            <h2 class="sec-title">تاریخچهٔ سواپ‌ها</h2>
+            <p class="help">هر ردیف یک سواپ واقعی است: چه فروختی / چه خریدی و با چه قیمتی.</p>
+          </div>
+          <button class="btn btn-danger" id="btnClear" type="button" style="height:36px;font-size:12px">پاک‌سازی همه</button>
         </div>
-        <div class="sim hidden" id="simOut"></div>
-      </div>
-    </section>
+        <div class="card" id="history" style="display:grid;gap:8px;padding:12px"></div>
+      </section>
 
-    <section>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <h2 style="margin:0">تاریخچه</h2>
-        <button class="btn btn-danger" id="btnClear" type="button">پاک‌سازی</button>
-      </div>
-      <div class="card" id="history" style="display:grid;gap:8px;padding:12px"></div>
-    </section>
+      <!-- Advanced: Telegram -->
+      <details class="adv">
+        <summary>
+          <span>هشدار تلگرام
+            <span class="summary-sub">اختیاری — وقتی قیمت به هدف رسید پیام بگیر</span>
+          </span>
+        </summary>
+        <div class="adv-body">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
+            <div class="callout info" style="margin:0;flex:1">
+              ۱) در تلگرام به <b>@BotFather</b> برو و یک ربات بساز<br>
+              ۲) توکن را کپی کن<br>
+              ۳) به ربات خودت <b>/start</b> بزن<br>
+              ۴) Chat ID را از <b>@userinfobot</b> بگیر
+            </div>
+            <label class="switch" title="فعال/خاموش" style="margin-top:6px">
+              <input id="tgEnabled" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <p class="callout warn" style="margin-top:12px">هشدار داخل مرورگر فقط وقتی این صفحه باز است کار می‌کند. برای پیام حتی با مرورگر بسته، از GitHub Action در پوشه <code>.github/workflows/</code> استفاده کن.</p>
+          <div class="grid2" style="margin-top:14px">
+            <div><label>توکن ربات</label><input id="tgToken" type="password" autocomplete="off" placeholder="123456:ABC..." /></div>
+            <div><label>Chat ID</label><input id="tgChat" placeholder="مثلاً 123456789" /></div>
+            <div><label>اگر قیمت از این عدد بالاتر رفت خبر بده</label><input id="tgAbove" inputmode="decimal" placeholder="مثلاً 1.60" /></div>
+            <div><label>اگر قیمت از این عدد پایین‌تر رفت خبر بده</label><input id="tgBelow" inputmode="decimal" placeholder="مثلاً 1.40" /></div>
+          </div>
+          <div style="margin-top:14px">
+            <label>هشدار سود نسبت به سواپ آخر (٪)</label>
+            <p class="help">مثلاً +1٪ یعنی وقتی نسبت به آخرین سواپ یک درصد جلو افتادی پیام بدهد.</p>
+            <div id="profitPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px"></div>
+            <div class="row" style="align-items:flex-end">
+              <div style="flex:1;min-width:100px"><input id="tgPctAdd" inputmode="decimal" placeholder="مثلاً ۱.۵" /></div>
+              <button class="btn btn-ghost" id="btnAddProfitPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
+            </div>
+          </div>
+          <div style="margin-top:14px">
+            <label>هشدار ضرر نسبت به سواپ آخر (٪)</label>
+            <p class="help">مثلاً −1٪ یعنی وقتی یک درصد عقب افتادی پیام بدهد.</p>
+            <div id="lossPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px"></div>
+            <div class="row" style="align-items:flex-end">
+              <div style="flex:1;min-width:100px"><input id="tgLossAdd" inputmode="decimal" placeholder="مثلاً ۱" /></div>
+              <button class="btn btn-ghost" id="btnAddLossPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
+            </div>
+          </div>
+          <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+            <div>
+              <p style="margin:0;font-size:13px;font-weight:600">گزارش وضعیت هر ۳۰ دقیقه</p>
+              <p class="muted" style="margin:2px 0 0">خلاصه قیمت و پیشنهاد را هر نیم‌ساعت بفرستد (صفحه باید باز باشد)</p>
+            </div>
+            <label class="switch" title="فعال">
+              <input id="tgPriceReport" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn btn-ghost" id="btnTgTest" type="button">ارسال پیام تست</button>
+          </div>
+        </div>
+      </details>
 
-    <footer>قیمت تصمیم = mid استخر STON.fi DEX · مرجع CEX جدا · لغزش تخمینی · سواپ از tonapi.io · داده روی همین مرورگر</footer>
+      <!-- Advanced: Manual trade -->
+      <details class="adv">
+        <summary>
+          <span>ثبت دستی سواپ
+            <span class="summary-sub">فقط اگر سواپی از کیف‌پول خوانده نشد</span>
+          </span>
+        </summary>
+        <div class="adv-body">
+          <p class="help" style="margin-top:0">معمولاً لازم نیست. اول همگام‌سازی کیف‌پول را امتحان کن.</p>
+          <div class="seg">
+            <button id="typeBuy" class="on-buy" type="button">خرید GRAM</button>
+            <button id="typeSell" type="button">فروش GRAM</button>
+          </div>
+          <div class="grid2">
+            <div><label>تاریخ و ساعت</label><input id="tDate" type="datetime-local" /></div>
+            <div><label id="gramLbl">مقدار GRAM</label><input id="tGram" inputmode="decimal" placeholder="70.40" /></div>
+            <div style="grid-column:1/-1"><label id="usdtLbl">مقدار USDT</label><input id="tUsdt" inputmode="decimal" placeholder="106.06" /></div>
+          </div>
+          <p class="muted" id="autoFeeHint" style="margin:12px 0 0">برای سواپ‌های کیف‌پول، کارمزد از زنجیره خوانده می‌شود.</p>
+          <button class="btn btn-primary" id="btnSave" type="button" style="margin-top:12px">ذخیره سواپ دستی</button>
+        </div>
+      </details>
+
+      <!-- Advanced: Targets + Sim -->
+      <details class="adv">
+        <summary>
+          <span>اهداف سود و شبیه‌ساز فروش
+            <span class="summary-sub">ببین اگر با قیمت X بفروشی چقدر می‌گیری</span>
+          </span>
+        </summary>
+        <div class="adv-body">
+          <h2 style="margin:0 0 8px;font-size:0.95rem">اهداف سود تقریبی</h2>
+          <p class="help" style="margin-top:0">این اعداد mid تقریبی‌اند و لغزش استخر را هم در نظر می‌گیرند.</p>
+          <div id="targets" style="display:grid;gap:8px;margin-bottom:18px"></div>
+          <h2 style="margin:0 0 8px;font-size:0.95rem">شبیه‌ساز فروش GRAM → USDT</h2>
+          <div class="row" style="align-items:flex-end">
+            <div style="flex:1;min-width:160px"><label>قیمت فرضی (mid)</label><input id="simPrice" inputmode="decimal" placeholder="1.55" /></div>
+            <button class="btn btn-primary" id="btnSim" type="button" style="width:auto;padding-inline:20px">محاسبه</button>
+          </div>
+          <div class="sim hidden" id="simOut"></div>
+        </div>
+      </details>
+    </div>
+
+    <footer>
+      قیمت تصمیم از استخر STON.fi · موجودی و سواپ از tonapi.io<br>
+      داده فقط روی همین مرورگر ذخیره می‌شود · کلید خصوصی لازم نیست
+    </footer>
   </div>
 
-  <div class="toast" id="toast"></div>
+<div class="toast" id="toast"></div>
   <!-- capital removed: all balances from wallet -->
   <div class="modal" id="modal">
     <div class="card" style="max-width:380px;width:100%">
@@ -330,7 +427,7 @@
     const ROUND = 0.2, STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
     const SEED = [];
     const KEY = "gram_trades_v2", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1", WKEY = "gram_wallet_addr_v1", SERIESKEY = "gram_price_series_v1";
-    const DEFAULT_WALLET = "EQCw1-hJcfl_YlneBdXmw2OHNx9CO76r5fDrl4gCI4uaf7wR";
+    const DEFAULT_WALLET = ""; // no default — user must paste their own address
     const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
     // Noise as fraction of price (1.2%); floor avoids zero at tiny prices
     const NOISE_PCT = 0.012, NOISE_FLOOR = 0.008;
@@ -388,7 +485,7 @@
     }
     function saveTrades() { localStorage.setItem(KEY, JSON.stringify(trades)); }
     function loadWallet() {
-      try { return localStorage.getItem(WKEY) || DEFAULT_WALLET; } catch { return DEFAULT_WALLET; }
+      try { return localStorage.getItem(WKEY) || ""; } catch { return ""; }
     }
     function saveWallet(a) {
       walletAddr = (a || "").trim();
@@ -1309,6 +1406,9 @@
     }
 
     function render() {
+      const hasWallet = !!(walletAddr && walletAddr.trim());
+      const walletHint = document.getElementById("walletHint");
+      if (walletHint) walletHint.classList.toggle("hidden", hasWallet);
       const s = calcState(trades, live);
       const adv = nextAdvice(s, live);
       const hint = document.getElementById("autoFeeHint");
@@ -1608,11 +1708,13 @@
     document.getElementById("btnPrice").onclick = () => { refreshPrice(true); refreshChart(); };
     document.getElementById("btnSyncWallet").onclick = () => syncWallet(true);
     document.getElementById("btnSyncNow").onclick = () => syncWallet(true);
-    document.getElementById("btnWalletSettings").onclick = () => {
-      document.getElementById("walletAddr").focus();
-      document.getElementById("walletAddr").select();
+    document.getElementById("walletAddr").onchange = () => {
+      saveWallet(document.getElementById("walletAddr").value);
+      render();
     };
-    document.getElementById("walletAddr").onchange = () => saveWallet(document.getElementById("walletAddr").value);
+    document.getElementById("walletAddr").onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); syncWallet(true); }
+    };
     document.getElementById("btnTgTest").onclick = () => {
       sendTelegram("GRAM Trader متصل شد. هشدار قیمت از این به بعد اینجا می‌آید.")
         .then(() => toast("پیام تست ارسال شد"))
@@ -1627,13 +1729,13 @@
 
     const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
     document.getElementById("tDate").value = now.toISOString().slice(0, 16);
-    document.getElementById("walletAddr").value = walletAddr || DEFAULT_WALLET;
+    document.getElementById("walletAddr").value = walletAddr || "";
     bindTg();
     render();
     refreshPrice(false);
     refreshChart();
     // auto-sync wallet on load (once)
-    setTimeout(() => { if (walletAddr) syncWallet(false); }, 1200);
+    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 1200);
     setInterval(() => refreshPrice(false), 45000);
     // auto re-sync wallet every 10 minutes
     setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
