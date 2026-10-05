@@ -1,6 +1,9 @@
 /**
- * GRAM Telegram alerts for GitHub Actions.
+ * GRAM Telegram alerts for GitHub Actions (scheduled / semi-online).
  * Shared logic: ./gram-core.mjs + ./telegram-messages.mjs
+ *
+ * For always-on (every ~2 min), use the Cloudflare Worker instead:
+ *   worker/  →  see worker/README.md
  *
  * Required secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WALLET_ADDRESS
  * Optional: ALERT_ABOVE, ALERT_BELOW, ALERT_PROFIT_PCTS, ALERT_LOSS_PCTS
