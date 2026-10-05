@@ -6,7 +6,7 @@
  *   TELEGRAM_BOT_TOKEN
  *   TELEGRAM_CHAT_ID
  * Optional:
- *   WALLET_ADDRESS          (default: project wallet)
+ *   WALLET_ADDRESS          required for wallet sync
  *   ALERT_ABOVE             e.g. 1.60
  *   ALERT_BELOW             e.g. 1.40
  *   ALERT_PROFIT_PCTS       e.g. "5,10"
@@ -22,7 +22,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const CHAT = process.env.TELEGRAM_CHAT_ID || "";
-const WALLET = process.env.WALLET_ADDRESS || "EQCw1-hJcfl_YlneBdXmw2OHNx9CO76r5fDrl4gCI4uaf7wR";
+const WALLET = process.env.WALLET_ADDRESS || "";
 const ALERT_ABOVE = num(process.env.ALERT_ABOVE);
 const ALERT_BELOW = num(process.env.ALERT_BELOW);
 const PROFIT_PCTS = listNums(process.env.ALERT_PROFIT_PCTS);
@@ -410,6 +410,10 @@ function stanceLine(stance, pos, price) {
 async function main() {
   if (!TOKEN || !CHAT) {
     console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
+    process.exit(1);
+  }
+  if (!WALLET) {
+    console.error("Missing WALLET_ADDRESS secret — set your TON wallet address in repo secrets");
     process.exit(1);
   }
 
