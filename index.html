@@ -333,9 +333,13 @@
     // ROUND only for advice safety-margin display — NOT used in P&L accounting
     const ROUND = 0.2, STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
     const SEED = [];
-    const KEY = "gram_trades_v2", CAPKEY = "gram_starting_capital_v1", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1", WKEY = "gram_wallet_addr_v1";
+    const KEY = "gram_trades_v2", CAPKEY = "gram_starting_capital_v1", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1", WKEY = "gram_wallet_addr_v1", SERIESKEY = "gram_price_series_v1";
     const DEFAULT_WALLET = "EQCw1-hJcfl_YlneBdXmw2OHNx9CO76r5fDrl4gCI4uaf7wR";
     const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
+    // moves smaller than this (absolute USDT) are treated as noise
+    const NOISE = 0.02;
+    // min unrealized profit % to bother alerting a "sell" opportunity (avoid break-even spam)
+    const MIN_ACTION_PCT = 0.4;
 
     let trades = loadTrades();
     let capital = loadCapital();
@@ -737,7 +741,9 @@
       try {
         const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
         if (!force && cached && now - cached.at < 45000) {
-          quote = { ...cached.q, cached: true, stale: false }; live = quote.usd; return quote;
+          quote = { ...cached.q, cached: true, stale: false }; live = quote.usd;
+          pushPriceSample(live);
+          return quote;
         }
       } catch (_) {}
       const sources = [fromKraken, fromCoinbase, fromSton, fromLlama, fromGecko];
@@ -747,6 +753,7 @@
           quote = { ...q, cached: false, stale: false, at: now };
           live = q.usd;
           localStorage.setItem(PKEY, JSON.stringify({ at: now, q }));
+          pushPriceSample(live);
           return quote;
         } catch (_) {}
       }
@@ -828,34 +835,155 @@
       }));
     }
 
+    /** Record price samples for momentum (keep ~2h at 45s interval) */
+    function pushPriceSample(price) {
+      if (price == null || !Number.isFinite(price)) return [];
+      let series = [];
+      try { series = JSON.parse(localStorage.getItem(SERIESKEY) || "[]"); } catch (_) {}
+      if (!Array.isArray(series)) series = [];
+      const now = Date.now();
+      series.push({ t: now, p: price });
+      // drop older than 3 hours, keep max 200 points
+      const cutoff = now - 3 * 60 * 60 * 1000;
+      series = series.filter((x) => x.t >= cutoff).slice(-200);
+      try { localStorage.setItem(SERIESKEY, JSON.stringify(series)); } catch (_) {}
+      return series;
+    }
+
+    /**
+     * Detect short-term momentum from samples.
+     * Noise filter: absolute moves < NOISE (0.02) ignored.
+     * Returns { dir: 'up'|'down'|'flat', delta, from, to, bars }
+     */
+    function detectMomentum(series) {
+      if (!series || series.length < 3) return { dir: "flat", delta: 0, from: null, to: null, bars: 0 };
+      const recent = series.slice(-12); // ~9 min at 45s
+      const from = recent[0].p;
+      const to = recent[recent.length - 1].p;
+      const delta = to - from;
+      // count consecutive direction of last few steps (skip noise steps)
+      let up = 0, down = 0;
+      for (let i = 1; i < recent.length; i++) {
+        const d = recent[i].p - recent[i - 1].p;
+        if (d >= NOISE) up++;
+        else if (d <= -NOISE) down++;
+      }
+      if (Math.abs(delta) < NOISE) return { dir: "flat", delta, from, to, bars: 0 };
+      if (delta > 0 && up >= down) return { dir: "up", delta, from, to, bars: up };
+      if (delta < 0 && down >= up) return { dir: "down", delta, from, to, bars: down };
+      return { dir: "flat", delta, from, to, bars: 0 };
+    }
+
+    /** Position stance from last swap / balances */
+    function positionStance(s) {
+      const hasGram = s.totalGram > 1e-6;
+      const hasUsdt = s.cashUsdt > 1e-6;
+      if (hasGram && !hasUsdt) {
+        return {
+          mode: "hold_gram",
+          label: "الان GRAM داری — منتظر اوج سود برای فروش",
+          action: "sell"
+        };
+      }
+      if (hasUsdt && !hasGram) {
+        return {
+          mode: "hold_usdt",
+          label: "الان USDT داری — منتظر ریزش GRAM برای خرید",
+          action: "buy"
+        };
+      }
+      if (hasGram && hasUsdt) {
+        // mixed: prefer the larger side by equity share
+        const gVal = s.totalGram * (live || s.avgBuyPrice || 0);
+        if (gVal >= s.cashUsdt) {
+          return { mode: "hold_gram", label: "بیشتر GRAM داری — تمرکز روی فروش در اوج", action: "sell" };
+        }
+        return { mode: "hold_usdt", label: "بیشتر USDT داری — تمرکز روی خرید در کف", action: "buy" };
+      }
+      return { mode: "empty", label: "پوزیشن خالی", action: null };
+    }
+
+    /** True if a sell at live would be meaningfully above break-even (not just noise) */
+    function sellIsWorthwhile(s, price) {
+      if (!s.avgBuyPrice || s.totalGram <= 0 || !price) return false;
+      const pct = ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100;
+      return pct >= MIN_ACTION_PCT && (price - s.avgBuyPrice) >= NOISE * 0.5;
+    }
+
+    /** True if buy at live is meaningfully below last sell / reference */
+    function buyIsWorthwhile(s, price) {
+      if (!price) return false;
+      // prefer last sell price as reference; else use avg if any residual
+      const ref = (s.lastSwapType === "sell" && s.lastSwapPrice) ? s.lastSwapPrice : null;
+      if (ref != null) {
+        const pct = ((ref - price) / ref) * 100;
+        return pct >= MIN_ACTION_PCT && (ref - price) >= NOISE * 0.5;
+      }
+      // no reference → any sustained drop is informative but don't claim profit
+      return true;
+    }
+
+    function stanceLine(stance, s, price) {
+      let line = "📍 " + stance.label;
+      if (stance.mode === "hold_gram" && s.avgBuyPrice) {
+        const pct = price ? ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100 : null;
+        line += "\nمیانگین ورود: " + fmt(s.avgBuyPrice, 4);
+        if (pct != null) line += " · سود/زیان شناور: " + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "٪";
+        if (price && !sellIsWorthwhile(s, price)) line += "\n⚠️ هنوز نزدیک سربه‌سر — فروش الکی پیشنهاد نمی‌شود";
+      }
+      if (stance.mode === "hold_usdt") {
+        if (s.lastSwapType === "sell" && s.lastSwapPrice) {
+          line += "\nآخرین فروش: " + fmt(s.lastSwapPrice, 4);
+          if (price) {
+            const pct = ((s.lastSwapPrice - price) / s.lastSwapPrice) * 100;
+            line += " · فاصله از آن: " + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "٪ ارزان‌تر";
+          }
+        }
+        line += "\nموجودی USDT: " + fmt(s.cashUsdt, 2);
+      }
+      return line;
+    }
+
     function maybeAlert(state) {
       if (!tg.enabled || !live || !tg.token || !tg.chatId) return;
+      const series = pushPriceSample(live);
+      const mom = detectMomentum(series);
+      const stance = positionStance(state);
       const above = Number(tg.alertAbove), below = Number(tg.alertBelow);
       const profitPcts = Array.isArray(tg.alertTargetPcts) ? tg.alertTargetPcts : [];
       const lossPcts = Array.isArray(tg.alertLossPcts) ? tg.alertLossPcts : [];
       let mem = null;
       try { mem = JSON.parse(localStorage.getItem(MEMKEY) || "null"); } catch (_) {}
       if (!mem || typeof mem !== "object") mem = {};
-      const now = Date.now(), cool = 20 * 60 * 1000;
-      const recently = (k) => mem[k] && now - mem[k] < cool;
+      const now = Date.now(), cool = 20 * 60 * 1000, coolMom = 12 * 60 * 1000;
+      const recently = (k, c) => mem[k] && now - mem[k] < (c || cool);
       const mark = (k) => { mem[k] = now; localStorage.setItem(MEMKEY, JSON.stringify(mem)); };
       let sent = false;
+
+      // --- fixed price thresholds (with stance context) ---
       if (above > 0 && live >= above && !recently("above")) {
         mark("above");
-        sendTelegram("GRAM به " + fmt(live, 4) + " رسید (سقف " + fmt(above, 4) + ")").then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+        let msg = "🔺 GRAM به " + fmt(live, 4) + " رسید (سقف " + fmt(above, 4) + ")\n" + stanceLine(stance, state, live);
+        if (stance.action === "sell" && sellIsWorthwhile(state, live)) msg += "\n✅ الان بالای هدف — آماده فروش باش";
+        else if (stance.action === "sell") msg += "\nهنوز سود معنادار نسبت به ورود نداری";
+        sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
         sent = true;
       } else if (below > 0 && live <= below && !recently("below")) {
         mark("below");
-        sendTelegram("GRAM به " + fmt(live, 4) + " رسید (کف " + fmt(below, 4) + ")").then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+        let msg = "🔻 GRAM به " + fmt(live, 4) + " رسید (کف " + fmt(below, 4) + ")\n" + stanceLine(stance, state, live);
+        if (stance.action === "buy" && buyIsWorthwhile(state, live)) msg += "\n✅ قیمت پایین آمده — آماده خرید GRAM باش";
+        sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
         sent = true;
       }
+
+      // --- profit / loss targets on open GRAM position ---
       if (state.investedUsdt > 0) {
         const curPct = (state.unrealizedPnl / state.investedUsdt) * 100;
         for (const targetPct of profitPcts) {
           const key = "profit_" + targetPct;
           if (curPct >= targetPct && !recently(key)) {
             mark(key);
-            sendTelegram("هدف سود " + targetPct + "٪ رسید. سود فعلی " + curPct.toFixed(2) + "٪ · قیمت " + fmt(live, 4))
+            sendTelegram("✅ هدف سود " + targetPct + "٪ رسید\nسود فعلی " + curPct.toFixed(2) + "٪ · قیمت " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\nاگر روند صعودی ادامه دارد می‌توانی کمی صبر کنی؛ اگر برگشت، بفروش")
               .then(() => toast("هشدار سود ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
             sent = true;
             break;
@@ -865,14 +993,82 @@
           const key = "loss_" + lossPct;
           if (curPct <= -lossPct && !recently(key)) {
             mark(key);
-            sendTelegram("هشدار ضرر " + lossPct + "٪. زیان فعلی " + curPct.toFixed(2) + "٪ · قیمت " + fmt(live, 4))
+            sendTelegram("⚠️ هشدار ضرر " + lossPct + "٪\nزیان فعلی " + curPct.toFixed(2) + "٪ · قیمت " + fmt(live, 4) + "\n" + stanceLine(stance, state, live))
               .then(() => toast("هشدار ضرر ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
             sent = true;
             break;
           }
         }
       }
+
+      // --- momentum / readiness alerts (noise-filtered) ---
+      // Rising while holding GRAM → get ready to sell (only if sell is worthwhile)
+      if (mom.dir === "up" && stance.action === "sell" && !recently("mom_up_sell", coolMom)) {
+        if (sellIsWorthwhile(state, live)) {
+          mark("mom_up_sell");
+          const msg = "📈 GRAM در حال رشد است (+" + fmt(Math.abs(mom.delta), 4) + " از " + fmt(mom.from, 4) + ")\nقیمت الان: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\n🟢 آماده‌باش فروش — اگر رشد ادامه داشت می‌توانی نزدیک اوج بفروشی";
+          sendTelegram(msg).then(() => toast("هشدار روند صعودی")).catch(() => {});
+          sent = true;
+        }
+      }
+      // Falling while holding GRAM → warn to sell before bigger drop (only if still above BE enough, or cut loss if configured)
+      if (mom.dir === "down" && stance.action === "sell" && !recently("mom_down_sell", coolMom)) {
+        const drop = Math.abs(mom.delta);
+        if (drop >= NOISE) {
+          mark("mom_down_sell");
+          let msg = "📉 GRAM در حال ریزش است (−" + fmt(drop, 4) + " از " + fmt(mom.from, 4) + ")\nقیمت الان: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live);
+          if (sellIsWorthwhile(state, live)) {
+            msg += "\n🟠 هنوز در سود هستی — اگر ریزش ادامه دارد، قبل از از دست رفتن سود بفروش";
+          } else {
+            msg += "\nنزدیک سربه‌سر یا زیر آن — فروش فقط اگر می‌خواهی ریسک را ببندی";
+          }
+          sendTelegram(msg).then(() => toast("هشدار روند نزولی")).catch(() => {});
+          sent = true;
+        }
+      }
+      // Falling while holding USDT → good time to prepare buy
+      if (mom.dir === "down" && stance.action === "buy" && !recently("mom_down_buy", coolMom)) {
+        const drop = Math.abs(mom.delta);
+        if (drop >= NOISE && buyIsWorthwhile(state, live)) {
+          mark("mom_down_buy");
+          const msg = "📉 GRAM ریزش کرده (−" + fmt(drop, 4) + " از " + fmt(mom.from, 4) + ")\nقیمت الان: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\n🟢 فرصت خرید نزدیک است — اگر ریزش ادامه داشت یا ثابت شد، می‌توانی GRAM بگیری";
+          sendTelegram(msg).then(() => toast("هشدار فرصت خرید")).catch(() => {});
+          sent = true;
+        }
+      }
+      // Rising after dip while holding USDT → recovering, time to buy before it runs
+      if (mom.dir === "up" && stance.action === "buy" && !recently("mom_up_buy", coolMom)) {
+        if (buyIsWorthwhile(state, live) || Math.abs(mom.delta) >= NOISE) {
+          // only if price still not far above last sell (don't chase)
+          const ref = (state.lastSwapType === "sell" && state.lastSwapPrice) ? state.lastSwapPrice : null;
+          const chasing = ref != null && live > ref + NOISE;
+          if (!chasing) {
+            mark("mom_up_buy");
+            const msg = "📈 GRAM بعد از ضعف دوباره رشد می‌کند (+" + fmt(Math.abs(mom.delta), 4) + ")\nقیمت الان: " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\n🟢 وقت خرید است — قبل از اینکه رشد بیشتر شود";
+            sendTelegram(msg).then(() => toast("هشدار خرید روی برگشت")).catch(() => {});
+            sent = true;
+          }
+        }
+      }
+
       return sent;
+    }
+
+    function buildStatusMessage(s) {
+      const stance = positionStance(s);
+      const series = (() => { try { return JSON.parse(localStorage.getItem(SERIESKEY) || "[]"); } catch { return []; } })();
+      const mom = detectMomentum(series);
+      const pnlPct = s.startingCapital > 0 ? (s.totalPnl / s.startingCapital) * 100 : null;
+      let msg = "📊 وضعیت GRAM\nقیمت: " + fmt(live, 4) + " USDT";
+      if (mom.dir === "up") msg += "\nروند کوتاه: صعودی (+" + fmt(Math.abs(mom.delta), 4) + ")";
+      else if (mom.dir === "down") msg += "\nروند کوتاه: نزولی (−" + fmt(Math.abs(mom.delta), 4) + ")";
+      else msg += "\nروند کوتاه: خنثی (نوسان کمتر از " + NOISE + ")";
+      msg += "\n" + stanceLine(stance, s, live);
+      if (s.totalGram > 0) msg += "\nموجودی: " + fmt(s.totalGram, 4) + " GRAM";
+      if (s.cashUsdt > 0) msg += "\nUSDT: " + fmt(s.cashUsdt, 2);
+      if (s.equity != null && live) msg += "\nارزش کل: " + fmt(s.equity, 2);
+      if (pnlPct != null) msg += "\nسود/زیان از سرمایه: " + (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "٪";
+      return msg;
     }
 
     function stat(label, value, hint, klass) {
@@ -1183,13 +1379,7 @@
       try {
         await refreshPrice(true);
         const s = calcState(trades, live, capital || 0);
-        const pnlPct = s.startingCapital > 0 ? (s.totalPnl / s.startingCapital) * 100 : null;
-        let msg = "گزارش ۳۰ دقیقه‌ای GRAM\nقیمت: " + fmt(live, 4) + " USDT";
-        if (s.totalGram > 0) msg += "\nموجودی: " + fmt(s.totalGram, 4) + " GRAM";
-        if (s.cashUsdt > 0) msg += "\nUSDT: " + fmt(s.cashUsdt, 2);
-        if (s.equity != null && live) msg += "\nارزش کل: " + fmt(s.equity, 2);
-        if (pnlPct != null) msg += "\nسود/زیان: " + (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "٪";
-        await sendTelegram(msg);
+        await sendTelegram(buildStatusMessage(s));
       } catch (_) {}
     }, 30 * 60 * 1000);
     window.addEventListener("resize", () => drawChart(chartPts, calcState(trades, live, capital || 0).avgBuyPrice || null));
