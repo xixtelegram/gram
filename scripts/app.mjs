@@ -946,8 +946,16 @@ function buildStatusMessage(s) {
   return tgBuildStatus(s, live, quote, lastTrade(), tgChecks(), poolTonReserve);
 }
 
+// Page-open grace + global gap so reopening the tab does not spam Telegram
+const ALERT_BOOT_GRACE_MS = 12000;
+const ALERT_GLOBAL_GAP_MS = 90 * 1000;
+const alertBootAt = Date.now();
+
 function maybeAlert(state) {
-  if (!tg.enabled || !live || !tg.token || !tg.chatId) return;
+  if (!tg.enabled || !live || !tg.token || !tg.chatId) return false;
+  // Skip noisy boot (price retries + multiple render calls)
+  if (Date.now() - alertBootAt < ALERT_BOOT_GRACE_MS) return false;
+
   const series = pushPriceSample(live);
   const mom = detectMomentum(series);
   const stance = positionStance(state);
@@ -959,93 +967,81 @@ function maybeAlert(state) {
   if (!mem || typeof mem !== "object") mem = {};
   const now = Date.now(), cool = 20 * 60 * 1000, coolMom = 12 * 60 * 1000;
   const recently = (k, c) => mem[k] && now - mem[k] < (c || cool);
-  const mark = (k) => { mem[k] = now; localStorage.setItem(MEMKEY, JSON.stringify(mem)); };
-  let sent = false;
+  // Global gap: at most one Telegram message every ALERT_GLOBAL_GAP_MS
+  if (mem._lastAny && now - mem._lastAny < ALERT_GLOBAL_GAP_MS) return false;
+  const mark = (k) => {
+    mem[k] = now;
+    mem._lastAny = now;
+    localStorage.setItem(MEMKEY, JSON.stringify(mem));
+  };
+  const sendOne = (msg, okToast) => {
+    sendTelegram(msg)
+      .then(() => { if (okToast) toast(okToast); })
+      .catch(() => toast("هشدار ارسال نشد"));
+    return true;
+  };
 
-  // --- fixed price thresholds (with stance context) ---
+  // Priority 1: fixed ceiling / floor
   if (above > 0 && live >= above && !recently("above")) {
     mark("above");
-    let msg = msgCeiling(above, live, stanceLine(stance, state, live));
-    sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
-    sent = true;
-  } else if (below > 0 && live <= below && !recently("below")) {
+    return sendOne(msgCeiling(above, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
+  }
+  if (below > 0 && live <= below && !recently("below")) {
     mark("below");
-    let msg = msgFloor(below, live, stanceLine(stance, state, live));
-    sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
-    sent = true;
+    return sendOne(msgFloor(below, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
   }
 
-  // --- profit / loss vs LAST SWAP price (real relative move) ---
+  // Priority 2: vs last swap (one message only)
   const lt = lastTrade();
   if (lt && lt.price > 0) {
     const ref = lt.price;
-    const movePct = ((live - ref) / ref) * 100; // + = price up since last swap
+    const movePct = ((live - ref) / ref) * 100;
     if (lt.type === "buy") {
-      // bought: profit when price up, loss when price down
       for (const targetPct of profitPcts) {
         const key = "ls_profit_buy_" + targetPct;
         if (movePct >= targetPct && !recently(key)) {
           mark(key);
-          sendTelegram(msgProfitBuy(movePct, targetPct, ref, live, stanceLine(stance, state, live)))
-            .then(() => toast("هشدار سود ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
-          sent = true;
-          break;
+          return sendOne(msgProfitBuy(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار سود ارسال شد");
         }
       }
       for (const lossPct of lossPcts) {
         const key = "ls_loss_buy_" + lossPct;
         if (movePct <= -lossPct && !recently(key)) {
           mark(key);
-          sendTelegram(msgLossBuy(movePct, lossPct, ref, live, stanceLine(stance, state, live)))
-            .then(() => toast("هشدار ضرر ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
-          sent = true;
-          break;
+          return sendOne(msgLossBuy(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار ضرر ارسال شد");
         }
       }
     } else if (lt.type === "sell") {
-      // sold: "profit" = price dropped (buy cheaper), "loss" = price rose (missed)
       for (const targetPct of profitPcts) {
         const key = "ls_profit_sell_" + targetPct;
         if (movePct <= -targetPct && !recently(key)) {
           mark(key);
-          sendTelegram(msgProfitSell(movePct, targetPct, ref, live, stanceLine(stance, state, live)))
-            .then(() => toast("هشدار فرصت خرید")).catch(() => toast("هشدار ارسال نشد"));
-          sent = true;
-          break;
+          return sendOne(msgProfitSell(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار فرصت خرید");
         }
       }
       for (const lossPct of lossPcts) {
         const key = "ls_loss_sell_" + lossPct;
         if (movePct >= lossPct && !recently(key)) {
           mark(key);
-          sendTelegram(msgLossSell(movePct, lossPct, ref, live, stanceLine(stance, state, live)))
-            .then(() => toast("هشدار رشد بعد از فروش")).catch(() => toast("هشدار ارسال نشد"));
-          sent = true;
-          break;
+          return sendOne(msgLossSell(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار رشد بعد از فروش");
         }
       }
     }
   }
 
-  // --- momentum / readiness alerts (noise-filtered) ---
-  // Rising while holding GRAM → get ready to sell (only if sell is worthwhile)
+  // Priority 3: momentum (lowest)
   if (mom.dir === "up" && stance.action === "sell" && !recently("mom_up_sell", coolMom)) {
     if (sellIsWorthwhile(state, live)) {
       mark("mom_up_sell");
-      const msg = msgTrendUp(mom.from, live, mom.delta, stanceLine(stance, state, live));
-      sendTelegram(msg).then(() => toast("هشدار روند صعودی")).catch(() => {});
-      sent = true;
+      return sendOne(msgTrendUp(mom.from, live, mom.delta, stanceLine(stance, state, live)), "هشدار روند صعودی");
     }
   }
-  // Falling while holding GRAM → warn to sell before bigger drop (only if still above BE enough, or cut loss if configured)
   if (mom.dir === "down" && stance.action === "sell" && !recently("mom_down_sell", coolMom)) {
     const drop = Math.abs(mom.delta);
     const nAbs = mom.noise || noiseAbs(live);
     if (drop >= nAbs) {
       mark("mom_down_sell");
-      let msg = msgTrendDown(mom.from, live, drop, stanceLine(stance, state, live));
-      sendTelegram(msg).then(() => toast("هشدار روند نزولی")).catch(() => {});
-      sent = true;
+      return sendOne(msgTrendDown(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار روند نزولی");
     }
   }
   if (mom.dir === "down" && stance.action === "buy" && !recently("mom_down_buy", coolMom)) {
@@ -1053,9 +1049,7 @@ function maybeAlert(state) {
     const nAbs = mom.noise || noiseAbs(live);
     if (drop >= nAbs && buyIsWorthwhile(state, live)) {
       mark("mom_down_buy");
-      const msg = msgDrop(mom.from, live, drop, stanceLine(stance, state, live));
-      sendTelegram(msg).then(() => toast("هشدار فرصت خرید")).catch(() => {});
-      sent = true;
+      return sendOne(msgDrop(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار فرصت خرید");
     }
   }
   if (mom.dir === "up" && stance.action === "buy" && !recently("mom_up_buy", coolMom)) {
@@ -1065,14 +1059,12 @@ function maybeAlert(state) {
       const chasing = ref != null && live > ref + nAbs;
       if (!chasing) {
         mark("mom_up_buy");
-        const msg = msgBounce(mom.delta, live, stanceLine(stance, state, live));
-        sendTelegram(msg).then(() => toast("هشدار خرید روی برگشت")).catch(() => {});
-        sent = true;
+        return sendOne(msgBounce(mom.delta, live, stanceLine(stance, state, live)), "هشدار خرید روی برگشت");
       }
     }
   }
 
-  return sent;
+  return false;
 }
 
 function stat(label, value, sub, tone) {
