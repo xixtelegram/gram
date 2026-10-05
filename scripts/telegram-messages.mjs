@@ -158,3 +158,44 @@ export function msgBounce(delta, live, stanceText) {
 export function msgConnected() {
   return "✅ اتصال برقرار شد\nهشدارهای GRAM از این به بعد اینجا می‌آیند.";
 }
+
+/**
+ * QuickChart URL for a small sparkline (no API key).
+ * @param {Array<{t?:number,p:number}>} series
+ * @param {number|null} live
+ */
+export function statusChartUrl(series, live) {
+  const pts = Array.isArray(series) ? series.map((x) => Number(x.p)).filter((n) => Number.isFinite(n)) : [];
+  if (live != null && Number.isFinite(live)) pts.push(Number(live));
+  if (pts.length < 2) return null;
+  const data = pts.slice(-40);
+  const cfg = {
+    type: "line",
+    data: {
+      labels: data.map(() => ""),
+      datasets: [{
+        data,
+        borderColor: "#14b8a6",
+        backgroundColor: "rgba(20,184,166,0.15)",
+        fill: true,
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.3,
+      }],
+    },
+    options: {
+      legend: { display: false },
+      scales: {
+        xAxes: [{ display: false }],
+        yAxes: [{ display: true, ticks: { fontColor: "#94a3b8", fontSize: 10 } }],
+      },
+      title: {
+        display: true,
+        text: live != null ? ("GRAM · " + Number(live).toFixed(4)) : "GRAM",
+        fontColor: "#e2e8f0",
+        fontSize: 14,
+      },
+    },
+  };
+  return "https://quickchart.io/chart?w=600&h=320&bkg=%23070a0e&c=" + encodeURIComponent(JSON.stringify(cfg));
+}
