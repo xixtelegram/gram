@@ -165,7 +165,14 @@
               <span class="slider" aria-hidden="true"></span>
             </label>
           </div>
-          <p class="callout warn" style="margin-top:12px">هشدار داخل مرورگر فقط وقتی این صفحه باز است کار می‌کند. برای پیام حتی با مرورگر بسته، از GitHub Action در پوشه <code>.github/workflows/</code> استفاده کن.</p>
+          <p class="callout warn" style="margin-top:12px">
+            هشدار داخل این صفحه فقط وقتی تب باز است کار می‌کند.<br>
+            برای پیام <b>حتی با سایت بسته</b>، در مخزن GitHub این Secrets را بگذار
+            (<b>Settings → Secrets and variables → Actions</b>):
+            <br><code>TELEGRAM_BOT_TOKEN</code> · <code>TELEGRAM_CHAT_ID</code> · <code>WALLET_ADDRESS</code>
+            <br>سپس workflow فایل <code>.github/workflows/ton-alert.yml</code> هر ۱۵ دقیقه اجرا می‌شود.
+            از تب Actions می‌توانی «Run workflow» بزنی تا یک گزارش تست بگیری.
+          </p>
           <div class="grid2" style="margin-top:14px">
             <div><label for="tgToken">توکن ربات</label><input id="tgToken" type="password" autocomplete="off" placeholder="123456:ABC..." /></div>
             <div><label for="tgChat">Chat ID</label><input id="tgChat" placeholder="مثلاً 123456789" inputmode="numeric" autocomplete="off" /></div>
