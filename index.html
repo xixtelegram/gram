@@ -1088,6 +1088,45 @@
       return true;
     }
 
+    /** Same advice as the UI card — appended to every Telegram message */
+    function lastSwapAdviceBlock(s, price) {
+      const lt = lastTrade();
+      if (!lt || !(lt.price > 0)) return "";
+      const ref = lt.price;
+      const pad = 1 - ROUND / 100;
+      const levels = [0.5, 1, 1.5, 2, 3, 5];
+      let out = "\n\n💡 پیشنهاد بر اساس سواپ آخر";
+      if (lt.type === "buy") {
+        const curPct = price ? ((price - ref) / ref) * 100 : null;
+        out += "\nآخرین سواپ: خرید GRAM @ " + fmt(ref, 4);
+        if (curPct != null) {
+          out += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? "سود " : "ضرر ") + Math.abs(curPct).toFixed(2) + "٪ نسبت به خرید";
+        }
+        if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی فروش را در نظر بگیری";
+        else out += "\nمنتظر رشد بالای اهداف فروش بمان";
+        out += "\nاهداف فروش:";
+        for (const pct of levels) {
+          const slip = (s && s.totalGram > 0) ? estSlippagePct(s.totalGram) / 100 : 0;
+          const midNeed = (ref * (1 + pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+          out += "\n• +" + pct + "٪ → mid ≈ " + fmt(midNeed, 4);
+        }
+      } else {
+        const curPct = price ? ((ref - price) / ref) * 100 : null;
+        out += "\nآخرین سواپ: فروش GRAM @ " + fmt(ref, 4);
+        if (curPct != null) {
+          out += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? curPct.toFixed(2) + "٪ ارزان‌تر از فروش" : Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش");
+        }
+        if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی دوباره بخری";
+        else out += "\nمنتظر ریزش زیر اهداف خرید بمان";
+        out += "\nاهداف خرید:";
+        for (const pct of levels) {
+          const target = ref * (1 - pct / 100) * pad;
+          out += "\n• −" + pct + "٪ → زیر " + fmt(target, 4);
+        }
+      }
+      return out;
+    }
+
     function stanceLine(stance, s, price) {
       let line = "📍 " + stance.label;
       if (stance.mode === "hold_gram" && s.avgBuyPrice) {
@@ -1106,6 +1145,7 @@
         }
         line += "\nموجودی USDT: " + fmt(s.cashUsdt, 2);
       }
+      line += lastSwapAdviceBlock(s, price);
       return line;
     }
 
@@ -1374,10 +1414,27 @@
       if (!trades.length) hist.innerHTML = '<p class="empty">هنوز سواپی نیست · از دکمه «همگام‌سازی کیف‌پول» استفاده کن</p>';
       else hist.innerHTML = trades.slice().reverse().map((t) => {
         const feeBits = [];
-        if ((t.networkFee || 0) > 0) feeBits.push("شبکه " + fmt(t.networkFee, 6));
-        if ((t.dexFeeUsdt || 0) > 0) feeBits.push("DEX " + fmt(t.dexFeeUsdt, 4) + " USDT");
-        const feeTxt = feeBits.length ? " · " + feeBits.join(" · ") : (t.exact || t.source === "wallet" ? " · خالص زنجیره" : "");
-        return '<div class="hist"><span class="badge ' + (t.type === "buy" ? "up" : "down") + '">' + (t.type === "buy" ? "→GRAM" : "→USDT") + '</span><div><p style="margin:0;font-weight:700;font-size:14px">' + fmt(t.gram, 4) + " GRAM · " + fmt(t.usdt, 2) + ' USDT</p><p class="muted" style="margin:0">' + faDate(t.date) + (t.source === "wallet" ? " · از کیف‌پول" : " · دستی") + feeTxt + '</p></div><div style="text-align:left"><p style="margin:0;font-weight:700;font-size:14px">' + fmt(t.price, 4) + '</p><button class="btn btn-danger" data-id="' + t.id + '" type="button" style="height:28px;padding:0 8px;font-size:12px;margin-top:4px">حذف</button></div></div>';
+        if ((t.networkFee || 0) > 0) feeBits.push("کارمزد شبکه " + fmt(t.networkFee, 6) + " TON");
+        if ((t.dexFeeUsdt || 0) > 0) feeBits.push("کارمزد DEX " + fmt(t.dexFeeUsdt, 4) + " USDT");
+        const feeTxt = feeBits.length ? feeBits.join(" · ") : ((t.exact || t.source === "wallet") ? "مبالغ خالص روی زنجیره" : "");
+        const isBuy = t.type === "buy";
+        const title = isBuy
+          ? ("خرید " + fmt(t.gram, 4) + " GRAM با پرداخت " + fmt(t.usdt, 2) + " USDT")
+          : ("فروش " + fmt(t.gram, 4) + " GRAM و دریافت " + fmt(t.usdt, 2) + " USDT");
+        const sub = faDate(t.date)
+          + (t.source === "wallet" ? " · خوانده‌شده از کیف‌پول" : " · ثبت دستی")
+          + (feeTxt ? " · " + feeTxt : "");
+        return '<div class="hist">'
+          + '<span class="badge ' + (isBuy ? "up" : "down") + '">' + (isBuy ? "خرید GRAM" : "فروش GRAM") + '</span>'
+          + '<div style="flex:1;min-width:0">'
+          + '<p style="margin:0;font-weight:700;font-size:14px;line-height:1.55">' + title + '</p>'
+          + '<p class="muted" style="margin:4px 0 0;font-size:12px">' + sub + '</p>'
+          + '</div>'
+          + '<div style="text-align:left;flex-shrink:0">'
+          + '<p style="margin:0;font-weight:700;font-size:14px">' + fmt(t.price, 4) + '</p>'
+          + '<p class="muted" style="margin:0;font-size:11px">قیمت اجرا</p>'
+          + '<button class="btn btn-danger" data-id="' + t.id + '" type="button" style="height:28px;padding:0 8px;font-size:12px;margin-top:4px">حذف</button>'
+          + '</div></div>';
       }).join("");
       hist.querySelectorAll("[data-id]").forEach((b) => b.onclick = () => ask("حذف معامله", "این معامله حذف شود؟", () => {
         trades = trades.filter((x) => x.id !== Number(b.dataset.id)); saveTrades(); render();
