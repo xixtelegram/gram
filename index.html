@@ -138,7 +138,7 @@
         <div class="list-card" id="history" role="list" aria-label="لیست سواپ‌ها"></div>
       </section>
 
-      <!-- Advanced: Telegram -->
+      <!-- Telegram — via GitHub Actions secrets only (no token in client) -->
       <details class="adv priority-low">
         <summary>
           <span class="adv-summary-inner">
@@ -147,62 +147,20 @@
             </span>
             <span>
               هشدار تلگرام
-              <span class="summary-sub">اختیاری — وقتی قیمت به هدف رسید پیام بگیر</span>
+              <span class="summary-sub">از GitHub Actions · بدون توکن در کد</span>
             </span>
           </span>
         </summary>
         <div class="adv-body">
-          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
-            <div class="callout info" style="margin:0;flex:1" role="note">
-              ۱) در تلگرام به <b>@BotFather</b> برو و یک ربات بساز<br>
-              ۲) توکن را کپی کن<br>
-              ۳) به ربات خودت <b>/start</b> بزن<br>
-              ۴) Chat ID را از <b>@userinfobot</b> بگیر
-            </div>
-            <label class="switch" style="margin-top:6px">
-              <span class="sr-only">فعال‌سازی هشدار تلگرام</span>
-              <input id="tgEnabled" type="checkbox" role="switch" aria-label="فعال‌سازی هشدار تلگرام" />
-              <span class="slider" aria-hidden="true"></span>
-            </label>
-          </div>
-          <p class="callout warn" style="margin-top:12px">هشدار داخل مرورگر فقط وقتی این صفحه باز است کار می‌کند. برای پیام حتی با مرورگر بسته، از GitHub Action در پوشه <code>.github/workflows/</code> استفاده کن.</p>
-          <div class="grid2" style="margin-top:14px">
-            <div><label for="tgToken">توکن ربات</label><input id="tgToken" type="password" autocomplete="off" placeholder="123456:ABC..." /></div>
-            <div><label for="tgChat">Chat ID</label><input id="tgChat" placeholder="مثلاً 123456789" inputmode="numeric" autocomplete="off" /></div>
-            <div><label for="tgAbove">اگر قیمت از این عدد بالاتر رفت خبر بده</label><input id="tgAbove" inputmode="decimal" placeholder="مثلاً 1.60" autocomplete="off" /></div>
-            <div><label for="tgBelow">اگر قیمت از این عدد پایین‌تر رفت خبر بده</label><input id="tgBelow" inputmode="decimal" placeholder="مثلاً 1.40" autocomplete="off" /></div>
-          </div>
-          <div style="margin-top:14px">
-            <label for="tgPctAdd">هشدار سود نسبت به سواپ آخر (٪)</label>
-            <p class="help">مثلاً +1٪ یعنی وقتی نسبت به آخرین سواپ یک درصد جلو افتادی پیام بدهد.</p>
-            <div id="profitPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px" role="list" aria-label="سطوح هشدار سود"></div>
-            <div class="row" style="align-items:flex-end">
-              <div style="flex:1;min-width:100px"><input id="tgPctAdd" inputmode="decimal" placeholder="مثلاً ۱.۵" autocomplete="off" aria-label="درصد سود جدید" /></div>
-              <button class="btn btn-ghost" id="btnAddProfitPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
-            </div>
-          </div>
-          <div style="margin-top:14px">
-            <label for="tgLossAdd">هشدار ضرر نسبت به سواپ آخر (٪)</label>
-            <p class="help">مثلاً −1٪ یعنی وقتی یک درصد عقب افتادی پیام بدهد.</p>
-            <div id="lossPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px" role="list" aria-label="سطوح هشدار ضرر"></div>
-            <div class="row" style="align-items:flex-end">
-              <div style="flex:1;min-width:100px"><input id="tgLossAdd" inputmode="decimal" placeholder="مثلاً ۱" autocomplete="off" aria-label="درصد ضرر جدید" /></div>
-              <button class="btn btn-ghost" id="btnAddLossPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
-            </div>
-          </div>
-          <div class="switch-row">
-            <div>
-              <p style="margin:0;font-size:13px;font-weight:600">گزارش وضعیت هر ۳۰ دقیقه</p>
-              <p class="muted" style="margin:2px 0 0">خلاصه قیمت و پیشنهاد را هر نیم‌ساعت بفرستد (صفحه باید باز باشد)</p>
-            </div>
-            <label class="switch">
-              <span class="sr-only">گزارش وضعیت هر ۳۰ دقیقه</span>
-              <input id="tgPriceReport" type="checkbox" role="switch" aria-label="گزارش وضعیت هر ۳۰ دقیقه" />
-              <span class="slider" aria-hidden="true"></span>
-            </label>
-          </div>
-          <div class="row" style="margin-top:12px">
-            <button class="btn btn-ghost" id="btnTgTest" type="button">ارسال پیام تست</button>
+          <div class="callout info" role="note">
+            توکن ربات و آدرس ولت در کد نیستند.<br>
+            در مخزن GitHub برو به <b>Settings → Secrets and variables → Actions</b> و این‌ها را بگذار:
+            <br><br>
+            <b>TELEGRAM_BOT_TOKEN</b> — توکن ربات<br>
+            <b>TELEGRAM_CHAT_ID</b> — Chat ID تو<br>
+            <b>WALLET_ADDRESS</b> — آدرس کیف‌پول TON
+            <br><br>
+            هشدار با workflow در <code>.github/workflows/ton-alert.yml</code> اجرا می‌شود — حتی اگر صفحه بسته باشد.
           </div>
         </div>
       </details>
