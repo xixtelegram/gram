@@ -29,10 +29,25 @@ const PROFIT_PCTS = listNums(process.env.ALERT_PROFIT_PCTS);
 const LOSS_PCTS = listNums(process.env.ALERT_LOSS_PCTS);
 const START_CAP = num(process.env.STARTING_CAPITAL) || 0;
 const STATE_PATH = process.env.STATE_PATH || ".alert-state.json";
-const NOISE = num(process.env.NOISE) ?? 0.02;
-const MIN_ACTION_PCT = num(process.env.MIN_ACTION_PCT) ?? 0.4;
+const NOISE_PCT = num(process.env.NOISE_PCT) ?? 0.012;
+const NOISE_FLOOR = num(process.env.NOISE_FLOOR) ?? 0.008;
+const MIN_ACTION_PCT = num(process.env.MIN_ACTION_PCT) ?? 0.5;
 const COOLDOWN_MS = 20 * 60 * 1000;
 const COOL_MOM_MS = 12 * 60 * 1000;
+const STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
+let poolTonReserve = 1.7e6;
+function noiseAbs(price) {
+  const p = price || 1;
+  return Math.max(NOISE_FLOOR, p * NOISE_PCT);
+}
+function estSlippagePct(gram) {
+  const r = poolTonReserve || 1e6;
+  if (!gram || gram <= 0) return 0;
+  return Math.min(8, (gram / (r + gram)) * 100);
+}
+function estExecSellPrice(mid, gram) {
+  return mid * (1 - estSlippagePct(gram) / 100);
+}
 
 function num(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -61,23 +76,37 @@ async function fetchJson(url, ms = 12000) {
 }
 
 async function getPrice() {
+  let dex = null, cex = null;
+  try {
+    const j = await fetchJson("https://api.ston.fi/v1/pools/" + STON);
+    const pool = j.pool || j;
+    const r0 = Number(pool.reserve0), r1 = Number(pool.reserve1);
+    if (r0 && r1) {
+      poolTonReserve = r1 / 1e9;
+      dex = { usd: (r0 / 1e6) / (r1 / 1e9), source: "STON.fi DEX" };
+    }
+  } catch (_) {}
   try {
     const j = await fetchJson("https://api.kraken.com/0/public/Ticker?pair=TONUSD");
     const row = j.result && j.result.TONUSD;
     const last = Number(row && row.c && row.c[0]);
-    if (last) return { usd: last, source: "Kraken" };
+    if (last) cex = { usd: last, source: "Kraken" };
   } catch (_) {}
-  try {
-    const j = await fetchJson("https://api.coinbase.com/v2/prices/TON-USD/spot");
-    const usd = Number(j.data && j.data.amount);
-    if (usd) return { usd, source: "Coinbase" };
-  } catch (_) {}
-  try {
-    const j = await fetchJson("https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd");
-    const usd = j["the-open-network"] && j["the-open-network"].usd;
-    if (usd) return { usd, source: "CoinGecko" };
-  } catch (_) {}
-  throw new Error("no price source");
+  if (!cex) {
+    try {
+      const j = await fetchJson("https://api.coinbase.com/v2/prices/TON-USD/spot");
+      const usd = Number(j.data && j.data.amount);
+      if (usd) cex = { usd, source: "Coinbase" };
+    } catch (_) {}
+  }
+  if (!dex && !cex) throw new Error("no price source");
+  const primary = dex || cex;
+  return {
+    usd: primary.usd,
+    source: primary.source,
+    dexUsd: dex ? dex.usd : null,
+    cexUsd: cex ? cex.usd : null,
+  };
 }
 
 function isUsdt(j) {
@@ -172,16 +201,41 @@ function calcPosition(swaps, price, startCap) {
   const equity = cash + value;
   const invested = cost;
   const unrealized = value - invested;
-  const totalPnl = equity - (startCap || 0);
+  // realized tracked during loop would need accumulator — approximate via totalPnl without startCap
+  const totalPnl = unrealized; // open PnL; full realized needs cost tracking on sells
   return {
-    gram, cash, avg, invested, value, equity, unrealized, totalPnl,
+    gram, cash, avg, invested, value, equity, unrealized, totalPnl, realized: 0,
     lastSwapType, lastSwapPrice,
   };
 }
 
+async function fetchWalletBalances(addr) {
+  const acc = await fetchJson(`https://tonapi.io/v2/accounts/${encodeURIComponent(addr)}`, 12000);
+  const ton = Number(acc.balance || 0) / 1e9;
+  let usdt = 0;
+  try {
+    const jets = await fetchJson(`https://tonapi.io/v2/accounts/${encodeURIComponent(addr)}/jettons`, 12000);
+    for (const b of jets.balances || []) {
+      const j = b.jetton || {};
+      if (isUsdt(j)) usdt += Number(b.balance || 0) / Math.pow(10, j.decimals || 6);
+    }
+  } catch (_) {}
+  return { ton, usdt };
+}
+
 async function fetchWalletSwaps(addr) {
-  const j = await fetchJson(`https://tonapi.io/v2/accounts/${encodeURIComponent(addr)}/events?limit=100`, 20000);
-  return parseSwaps(j.events || []);
+  let all = [], nextFrom = null;
+  for (let i = 0; i < 8; i++) {
+    let url = `https://tonapi.io/v2/accounts/${encodeURIComponent(addr)}/events?limit=100`;
+    if (nextFrom != null) url += `&before_lt=${nextFrom}`;
+    const j = await fetchJson(url, 20000);
+    const batch = j.events || [];
+    if (!batch.length) break;
+    all = all.concat(batch);
+    if (j.next_from == null || j.next_from === nextFrom) break;
+    nextFrom = j.next_from;
+  }
+  return parseSwaps(all);
 }
 
 async function sendTelegram(text) {
@@ -228,21 +282,32 @@ function pushSeries(mem, price) {
 }
 
 function detectMomentum(series) {
-  if (!series || series.length < 3) return { dir: "flat", delta: 0, from: null, to: null };
-  const recent = series.slice(-12);
-  const from = recent[0].p;
-  const to = recent[recent.length - 1].p;
-  const delta = to - from;
-  let up = 0, down = 0;
-  for (let i = 1; i < recent.length; i++) {
-    const d = recent[i].p - recent[i - 1].p;
-    if (d >= NOISE) up++;
-    else if (d <= -NOISE) down++;
+  if (!series || series.length < 4) return { dir: "flat", delta: 0, from: null, to: null, noise: NOISE_FLOOR };
+  const shortN = Math.min(series.length, 20);
+  const medN = Math.min(series.length, 60);
+  const short = series.slice(-shortN);
+  const med = series.slice(-medN);
+  const nAbs = noiseAbs(short[short.length - 1].p);
+  function win(arr) {
+    const from = arr[0].p, to = arr[arr.length - 1].p, delta = to - from;
+    let up = 0, down = 0;
+    for (let i = 1; i < arr.length; i++) {
+      const d = arr[i].p - arr[i - 1].p;
+      if (d >= nAbs) up++;
+      else if (d <= -nAbs) down++;
+    }
+    let dir = "flat";
+    if (Math.abs(delta) >= nAbs) {
+      if (delta > 0 && up >= down) dir = "up";
+      else if (delta < 0 && down >= up) dir = "down";
+    }
+    return { dir, delta, from, to };
   }
-  if (Math.abs(delta) < NOISE) return { dir: "flat", delta, from, to };
-  if (delta > 0 && up >= down) return { dir: "up", delta, from, to };
-  if (delta < 0 && down >= up) return { dir: "down", delta, from, to };
-  return { dir: "flat", delta, from, to };
+  const s = win(short), m = win(med);
+  let dir = s.dir;
+  if (s.dir !== "flat" && m.dir !== "flat" && s.dir !== m.dir) dir = "flat";
+  else if (s.dir === "flat" && m.dir !== "flat") dir = m.dir;
+  return { dir, delta: s.delta, from: s.from, to: s.to, noise: nAbs, medDir: m.dir };
 }
 
 function positionStance(pos, live) {
@@ -266,8 +331,9 @@ function positionStance(pos, live) {
 
 function sellIsWorthwhile(pos, price) {
   if (!pos || !pos.avg || pos.gram <= 0 || !price) return false;
-  const pct = ((price - pos.avg) / pos.avg) * 100;
-  return pct >= MIN_ACTION_PCT && (price - pos.avg) >= NOISE * 0.5;
+  const exec = estExecSellPrice(price, pos.gram);
+  const pct = ((exec - pos.avg) / pos.avg) * 100;
+  return pct >= MIN_ACTION_PCT && (exec - pos.avg) >= noiseAbs(price) * 0.5;
 }
 
 function buyIsWorthwhile(pos, price) {
@@ -275,7 +341,7 @@ function buyIsWorthwhile(pos, price) {
   const ref = pos.lastSwapType === "sell" && pos.lastSwapPrice ? pos.lastSwapPrice : null;
   if (ref != null) {
     const pct = ((ref - price) / ref) * 100;
-    return pct >= MIN_ACTION_PCT && (ref - price) >= NOISE * 0.5;
+    return pct >= MIN_ACTION_PCT && (ref - price) >= noiseAbs(price) * 0.5;
   }
   return true;
 }
@@ -313,9 +379,21 @@ async function main() {
 
   let pos = null;
   try {
-    const swaps = await fetchWalletSwaps(WALLET);
+    const [swaps, bal] = await Promise.all([
+      fetchWalletSwaps(WALLET),
+      fetchWalletBalances(WALLET).catch(() => null),
+    ]);
     console.log(`Wallet swaps: ${swaps.length}`);
-    pos = calcPosition(swaps, live, START_CAP);
+    pos = calcPosition(swaps, live, 0);
+    if (bal) {
+      pos.gram = bal.ton;
+      pos.cash = bal.usdt;
+      pos.value = bal.ton * live;
+      pos.equity = bal.usdt + pos.value;
+      pos.unrealized = pos.value - pos.invested;
+      pos.totalPnl = pos.realized != null ? pos.realized + pos.unrealized : pos.unrealized;
+      console.log(`Chain bal TON=${bal.ton} USDT=${bal.usdt}`);
+    }
     console.log(`Position GRAM=${pos.gram} cash=${pos.cash} avg=${pos.avg} equity=${pos.equity}`);
   } catch (e) {
     console.warn("Wallet fetch failed:", e.message);
@@ -373,7 +451,7 @@ async function main() {
   }
   if (mom.dir === "down" && stance.action === "sell" && !recently(mem, "mom_down_sell", COOL_MOM_MS)) {
     const drop = Math.abs(mom.delta);
-    if (drop >= NOISE) {
+    if (drop >= (mom.noise || noiseAbs(live))) {
       mark(mem, "mom_down_sell");
       let msg = `📉 GRAM در حال ریزش است (−${fmt(drop)} از ${fmt(mom.from)})\nقیمت الان: ${fmt(live)}\n${stanceLine(stance, pos, live)}`;
       if (sellIsWorthwhile(pos, live)) {
@@ -386,15 +464,15 @@ async function main() {
   }
   if (mom.dir === "down" && stance.action === "buy" && !recently(mem, "mom_down_buy", COOL_MOM_MS)) {
     const drop = Math.abs(mom.delta);
-    if (drop >= NOISE && buyIsWorthwhile(pos, live)) {
+    if (drop >= (mom.noise || noiseAbs(live)) && buyIsWorthwhile(pos, live)) {
       mark(mem, "mom_down_buy");
       msgs.push(`📉 GRAM ریزش کرده (−${fmt(drop)} از ${fmt(mom.from)})\nقیمت الان: ${fmt(live)}\n${stanceLine(stance, pos, live)}\n🟢 فرصت خرید نزدیک است`);
     }
   }
   if (mom.dir === "up" && stance.action === "buy" && !recently(mem, "mom_up_buy", COOL_MOM_MS)) {
     const ref = pos && pos.lastSwapType === "sell" && pos.lastSwapPrice ? pos.lastSwapPrice : null;
-    const chasing = ref != null && live > ref + NOISE;
-    if (!chasing && (buyIsWorthwhile(pos, live) || Math.abs(mom.delta) >= NOISE)) {
+    const chasing = ref != null && live > ref + (mom.noise || noiseAbs(live));
+    if (!chasing && (buyIsWorthwhile(pos, live) || Math.abs(mom.delta) >= (mom.noise || noiseAbs(live)))) {
       mark(mem, "mom_up_buy");
       msgs.push(`📈 GRAM بعد از ضعف دوباره رشد می‌کند (+${fmt(Math.abs(mom.delta))})\nقیمت الان: ${fmt(live)}\n${stanceLine(stance, pos, live)}\n🟢 وقت خرید است — قبل از رشد بیشتر`);
     }
@@ -405,7 +483,7 @@ async function main() {
     let msg = `📊 وضعیت GRAM\nقیمت: ${fmt(live)} USDT (${priceInfo.source})`;
     if (mom.dir === "up") msg += `\nروند کوتاه: صعودی (+${fmt(Math.abs(mom.delta))})`;
     else if (mom.dir === "down") msg += `\nروند کوتاه: نزولی (−${fmt(Math.abs(mom.delta))})`;
-    else msg += `\nروند کوتاه: خنثی (نوسان < ${NOISE})`;
+    else msg += `\nروند کوتاه: خنثی (نویز ~${noiseAbs(live).toFixed(4)})`;
     msg += `\n${stanceLine(stance, pos, live)}`;
     if (pos) {
       if (pos.gram > 0) msg += `\nموجودی: ${fmt(pos.gram, 4)} GRAM`;
