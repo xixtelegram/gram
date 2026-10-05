@@ -14,6 +14,7 @@ import {
   msgTrendDown,
   msgDrop,
   msgBounce,
+  msgConnected,
 } from "./telegram-messages.mjs";
 
 // ROUND = safety margin on advice only (not P&L)
@@ -23,8 +24,12 @@ const KEY = "gram_trades_v2", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_m
 const DEFAULT_WALLET = ""; // no default — user must paste their own address
 const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
 // Noise as fraction of price (1.2%); floor avoids zero at tiny prices
-// TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / WALLET_ADDRESS → فقط در GitHub Actions Secrets
+// Each user sets their own bot token + chat id in the Telegram panel
 const NOISE_PCT = 0.012, NOISE_FLOOR = 0.008;
+
+function botToken() {
+  return (tg && tg.token ? String(tg.token) : "").trim();
+}
 const MIN_ACTION_PCT = 0.5; // min edge over BE before suggesting sell/buy
 // Rough pool TON reserve for slippage estimate (updated from STON when available)
 let poolTonReserve = 1.7e6;
@@ -350,6 +355,7 @@ async function syncWallet(force) {
 // starting capital removed — balances & PnL come from wallet + trades only
 function loadTg() {
   const d = {
+    token: "",
     chatId: "",
     enabled: false,
     alertAbove: "",
@@ -361,8 +367,6 @@ function loadTg() {
   try {
     const raw = JSON.parse(localStorage.getItem(TGKEY) || "{}");
     const merged = { ...d, ...raw };
-    // token is always the built-in bot — never store user tokens
-    delete merged.token;
     if (raw.alertTargetPct != null && (raw.alertTargetPcts == null || !Array.isArray(raw.alertTargetPcts))) {
       const n = Number(raw.alertTargetPct);
       merged.alertTargetPcts = Number.isFinite(n) && n > 0 ? [n] : [5];
@@ -375,7 +379,8 @@ function loadTg() {
   } catch { return d; }
 }
 function saveTg() {
-  const toSave = {
+  localStorage.setItem(TGKEY, JSON.stringify({
+    token: tg.token || "",
     chatId: tg.chatId || "",
     enabled: !!tg.enabled,
     alertAbove: tg.alertAbove || "",
@@ -383,8 +388,7 @@ function saveTg() {
     alertTargetPcts: tg.alertTargetPcts || [],
     alertLossPcts: tg.alertLossPcts || [],
     priceReport30m: !!tg.priceReport30m,
-  };
-  localStorage.setItem(TGKEY, JSON.stringify(toSave));
+  }));
 }
 
 function takeFromInv(inv, amount) {
@@ -821,9 +825,26 @@ function drawChart(pts, avg) {
   ctx.fillStyle = g; ctx.fill();
 }
 
-/** Browser never holds the bot token. Real Telegram delivery = GitHub Action + Secrets. */
-function sendTelegram(_text) {
-  return Promise.reject(new Error("تلگرام از مرورگر ارسال نمی‌شود؛ از GitHub Actions استفاده کن"));
+/** Send via official bot; each user only supplies their numeric Chat ID. */
+function sendTelegram(text) {
+  const token = botToken();
+  const chat = (tg.chatId || "").trim();
+  if (!token) return Promise.reject(new Error("توکن ربات لازم است"));
+  if (!chat) return Promise.reject(new Error("Chat ID عددی لازم است"));
+  const url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(text);
+  return fetch(url).then((r) => r.json()).then((j) => {
+    if (!j.ok) throw new Error(j.description || "ارسال ناموفق");
+    return j;
+  }).catch((err) => {
+    // fallback image beacon (some environments block fetch to api.telegram.org)
+    return new Promise((resolve, reject) => {
+      if (err && String(err.message || "").includes("ناموفق")) return reject(err);
+      const img = new Image();
+      img.onload = img.onerror = () => resolve(true);
+      img.src = url;
+      setTimeout(() => resolve(true), 1500);
+    });
+  });
 }
 
 /** Record price samples for momentum (keep ~2h at 45s interval) */
@@ -938,9 +959,7 @@ function buildStatusMessage(s) {
 }
 
 function maybeAlert(state) {
-  // Browser-side Telegram API disabled (token lives only in Actions secrets)
-  if (!tg.enabled || !live || !tg.chatId) return;
-  return; // delivery via Actions only
+  if (!tg.enabled || !live || !botToken() || !tg.chatId) return;
   const series = pushPriceSample(live);
   const mom = detectMomentum(series);
   const stance = positionStance(state);
@@ -1309,18 +1328,24 @@ function renderPctChips(containerId, list, kind) {
 }
 
 function bindTg() {
+  const tokenEl = document.getElementById("tgToken");
   const chatEl = document.getElementById("tgChat");
   const enEl = document.getElementById("tgEnabled");
+  const aboveEl = document.getElementById("tgAbove");
+  const belowEl = document.getElementById("tgBelow");
   const repEl = document.getElementById("tgPriceReport");
+  if (tokenEl) tokenEl.value = tg.token || "";
   if (chatEl) chatEl.value = tg.chatId || "";
   if (enEl) enEl.checked = !!tg.enabled;
+  if (aboveEl) aboveEl.value = tg.alertAbove || "";
+  if (belowEl) belowEl.value = tg.alertBelow || "";
   if (repEl) repEl.checked = !!tg.priceReport30m;
-  if (chatEl) {
-    chatEl.oninput = (e) => {
-      tg.chatId = e.target.value.trim();
-      saveTg();
-    };
-  }
+  const map = { tgToken: "token", tgChat: "chatId", tgAbove: "alertAbove", tgBelow: "alertBelow" };
+  ["tgToken", "tgChat", "tgAbove", "tgBelow"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.oninput = (e) => { tg[map[id]] = e.target.value; saveTg(); };
+  });
   if (enEl) {
     enEl.onchange = (e) => {
       tg.enabled = e.target.checked;
@@ -1333,6 +1358,40 @@ function bindTg() {
       tg.priceReport30m = e.target.checked;
       saveTg();
       toast(tg.priceReport30m ? "گزارش هر ۳۰ دقیقه فعال شد" : "گزارش هر ۳۰ دقیقه خاموش شد");
+    };
+  }
+  if (document.getElementById("profitPctList")) {
+    renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
+  }
+  if (document.getElementById("lossPctList")) {
+    renderPctChips("lossPctList", tg.alertLossPcts, "loss");
+  }
+  const btnAddP = document.getElementById("btnAddProfitPct");
+  if (btnAddP) {
+    btnAddP.onclick = () => {
+      const n = Number(document.getElementById("tgPctAdd").value);
+      if (!Number.isFinite(n) || n <= 0) { toast("درصد معتبر وارد کن"); return; }
+      if (tg.alertTargetPcts.includes(n)) { toast("این درصد از قبل هست"); return; }
+      tg.alertTargetPcts.push(n);
+      tg.alertTargetPcts.sort((a, b) => a - b);
+      saveTg();
+      document.getElementById("tgPctAdd").value = "";
+      renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
+      toast("هشدار سود +" + n + "٪ اضافه شد");
+    };
+  }
+  const btnAddL = document.getElementById("btnAddLossPct");
+  if (btnAddL) {
+    btnAddL.onclick = () => {
+      const n = Number(document.getElementById("tgLossAdd").value);
+      if (!Number.isFinite(n) || n <= 0) { toast("درصد معتبر وارد کن"); return; }
+      if (tg.alertLossPcts.includes(n)) { toast("این درصد از قبل هست"); return; }
+      tg.alertLossPcts.push(n);
+      tg.alertLossPcts.sort((a, b) => a - b);
+      saveTg();
+      document.getElementById("tgLossAdd").value = "";
+      renderPctChips("lossPctList", tg.alertLossPcts, "loss");
+      toast("هشدار ضرر −" + n + "٪ اضافه شد");
     };
   }
 }
@@ -1427,6 +1486,14 @@ document.getElementById("walletAddr").onchange = () => {
 document.getElementById("walletAddr").onkeydown = (e) => {
   if (e.key === "Enter") { e.preventDefault(); syncWallet(true); }
 };
+const btnTgTest = document.getElementById("btnTgTest");
+if (btnTgTest) {
+  btnTgTest.onclick = () => {
+    sendTelegram(msgConnected())
+      .then(() => toast("پیام تست ارسال شد"))
+      .catch((e) => toast(e.message || "ارسال ناموفق"));
+  };
+}
 document.getElementById("chartDays").onclick = (e) => {
   const b = e.target.closest("button"); if (!b) return;
   chartDays = Number(b.dataset.d);
@@ -1481,8 +1548,7 @@ setInterval(() => { refreshPrice(false); }, 15000);
 // auto re-sync wallet every 10 minutes
 setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
 setInterval(async () => {
-  if (!tg.priceReport30m || !tg.enabled || !tg.chatId) return;
-  return; // status report via Actions only
+  if (!tg.priceReport30m || !tg.enabled || !botToken() || !tg.chatId) return;
   try {
     await refreshPrice(true);
     const s = calcState(trades, live);
