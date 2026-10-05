@@ -1000,25 +1000,55 @@
     }
 
 
+    function paintPrice() {
+      const el = document.getElementById("livePrice");
+      const meta = document.getElementById("priceMeta");
+      const pill = document.getElementById("chgPill");
+      if (el) el.textContent = (live != null && Number.isFinite(Number(live))) ? fmt(live, 4) : "—";
+      if (quote && meta) {
+        let m = (quote.source || "بازار") + (quote.cached ? " · کش" : "") + (quote.stale ? " · قدیمی" : "");
+        if (quote.dexUsd != null && quote.cexUsd != null) {
+          const sp = quote.dexUsd - quote.cexUsd;
+          m += " · CEX " + fmt(quote.cexUsd, 4) + " · اختلاف " + (sp >= 0 ? "+" : "") + fmt(sp, 4);
+        }
+        meta.textContent = m;
+      } else if (meta && live == null) {
+        meta.textContent = "در حال دریافت قیمت…";
+      }
+      if (pill) {
+        if (quote && quote.change24h != null) {
+          const ch = quote.change24h;
+          pill.className = "pill " + (ch >= 0 ? "up" : "down");
+          pill.textContent = (ch >= 0 ? "▲ " : "▼ ") + Math.abs(ch).toFixed(2) + "٪";
+          pill.classList.remove("hidden");
+        }
+      }
+    }
+
     function applyQuote(q, opts) {
       opts = opts || {};
       quote = Object.assign({}, q, {
         cached: !!opts.cached,
         stale: !!opts.stale
       });
-      live = quote.usd;
+      live = Number(quote.usd);
+      if (!Number.isFinite(live)) live = null;
       if (quote.dexUsd != null) dexPrice = quote.dexUsd;
       if (quote.cexUsd != null) cexPrice = quote.cexUsd;
-      try { pushPriceSample(live); } catch (_) {}
+      try { if (live != null) pushPriceSample(live); } catch (_) {}
       try {
-        localStorage.setItem(PKEY, JSON.stringify({ at: Date.now(), q: {
-          usd: quote.usd,
-          change24h: quote.change24h,
-          source: quote.source,
-          dexUsd: quote.dexUsd,
-          cexUsd: quote.cexUsd
-        }}));
+        if (live != null) {
+          localStorage.setItem(PKEY, JSON.stringify({ at: Date.now(), q: {
+            usd: quote.usd,
+            change24h: quote.change24h,
+            source: quote.source,
+            dexUsd: quote.dexUsd,
+            cexUsd: quote.cexUsd
+          }}));
+        }
       } catch (_) {}
+      // Critical: paint immediately so user never depends on full render / button
+      try { paintPrice(); } catch (_) {}
     }
 
     async function getPrice(force) {
@@ -1757,17 +1787,16 @@
       if (btn) btn.disabled = true;
       try {
         await getPrice(!!force);
+        try { paintPrice(); } catch (_) {}
         try { render(); } catch (re) { console.error(re); }
       } catch (e) {
         console.error("price", e);
-        const el = document.getElementById("livePrice");
+        try { paintPrice(); } catch (_) {}
         const meta = document.getElementById("priceMeta");
-        if (live != null && Number.isFinite(Number(live))) {
-          if (el) el.textContent = fmt(live, 4);
-          if (meta) meta.textContent = "آفلاین · آخرین قیمت";
-        } else {
-          if (el) el.textContent = "—";
+        if (!(live != null && Number.isFinite(Number(live)))) {
           if (meta) meta.textContent = "در حال اتصال…";
+        } else if (meta) {
+          meta.textContent = "آخرین قیمت · در حال تلاش دوباره";
         }
       } finally {
         fetching = false;
@@ -1850,51 +1879,42 @@
     document.getElementById("tDate").value = now.toISOString().slice(0, 16);
     document.getElementById("walletAddr").value = walletAddr || "";
     bindTg();
-    // ---- boot: show cache, then ALWAYS fetch live price once (no click needed) ----
-    try {
-      const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
-      if (cached && cached.q && cached.q.usd) {
-        quote = Object.assign({}, cached.q, { cached: true, stale: false });
-        live = quote.usd;
-        if (quote.dexUsd != null) dexPrice = quote.dexUsd;
-        if (quote.cexUsd != null) cexPrice = quote.cexUsd;
-      }
-    } catch (_) {}
-    render();
+    // ---- boot price (automatic, no click) ----
+    function loadCachedPrice() {
+      try {
+        const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
+        if (cached && cached.q && cached.q.usd) {
+          applyQuote(cached.q, { cached: true, stale: false });
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+    loadCachedPrice();
+    try { render(); } catch (_) {}
 
-    (async function bootPrice() {
-      fetching = false; // never start stuck
-      const meta = document.getElementById("priceMeta");
-      if (meta && live == null) meta.textContent = "در حال دریافت قیمت…";
+    async function autoPriceOnce(reason) {
+      fetching = false;
       try {
         await getPrice(true);
+        try { paintPrice(); } catch (_) {}
         try { render(); } catch (_) {}
+        return true;
       } catch (e) {
-        console.error("boot price", e);
-        // one automatic retry after 2s
-        setTimeout(async () => {
-          try {
-            await getPrice(true);
-            try { render(); } catch (_) {}
-          } catch (e2) {
-            console.error("boot price retry", e2);
-            const el = document.getElementById("livePrice");
-            const m = document.getElementById("priceMeta");
-            if (live != null && Number.isFinite(Number(live))) {
-              if (el) el.textContent = fmt(live, 4);
-              if (m) m.textContent = "آخرین قیمت · اتصال تازه ناموفق";
-            } else if (m) {
-              m.textContent = "قیمت در دسترس نیست · بعداً خودش دوباره تلاش می‌کند";
-            }
-          }
-        }, 2000);
+        console.error("autoPrice", reason, e);
+        return false;
       }
-    })();
+    }
 
-    setTimeout(() => { refreshChart(); }, 800);
-    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 2000);
-    // keep auto-updating
-    setInterval(() => refreshPrice(false), 15000);
+    // fire immediately + retries (covers slow network / first-paint races)
+    autoPriceOnce("boot");
+    setTimeout(() => { if (live == null) autoPriceOnce("retry-1s"); }, 1000);
+    setTimeout(() => { autoPriceOnce("retry-3s"); }, 3000);
+    setTimeout(() => { if (live == null) autoPriceOnce("retry-6s"); }, 6000);
+
+    setTimeout(() => { refreshChart(); }, 1000);
+    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 2500);
+    setInterval(() => { refreshPrice(false); }, 15000);
     // auto re-sync wallet every 10 minutes
     setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
     setInterval(async () => {
