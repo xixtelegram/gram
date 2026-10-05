@@ -1,21 +1,19 @@
-# GRAM Telegram alerts — secrets never live in source code
-# Required repository secrets:
-#   TELEGRAM_BOT_TOKEN
-#   TELEGRAM_CHAT_ID
-#   WALLET_ADDRESS
+# GRAM / TON Telegram alerts — runs without the browser
+#
+# Secrets (required):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WALLET_ADDRESS
 # Optional:
 #   ALERT_ABOVE, ALERT_BELOW, ALERT_PROFIT_PCTS, ALERT_LOSS_PCTS
 
-name: GRAM Telegram Alert
+name: GRAM Telegram Alerts
 
 on:
   schedule:
-    # every 15 minutes
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       report:
-        description: "Send full status report even without trigger"
+        description: "Send full status report (manual runs default to yes)"
         required: false
         default: "true"
         type: choice
@@ -39,7 +37,16 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Run ton-alert
+      - name: Restore alert state
+        uses: actions/cache@v4
+        with:
+          path: .alert-state.json
+          key: alert-state-v2-${{ github.repository }}
+          restore-keys: |
+            alert-state-v2-
+            alert-state-
+
+      - name: Run alert check
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -48,5 +55,16 @@ jobs:
           ALERT_BELOW: ${{ secrets.ALERT_BELOW }}
           ALERT_PROFIT_PCTS: ${{ secrets.ALERT_PROFIT_PCTS }}
           ALERT_LOSS_PCTS: ${{ secrets.ALERT_LOSS_PCTS }}
-          REPORT: ${{ github.event.inputs.report || '' }}
+          STARTING_CAPITAL: ${{ secrets.STARTING_CAPITAL }}
+          # Manual run → always report unless user picks false
+          REPORT: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.report != 'false') && '1' || (github.event.inputs.report == 'true' && '1' || '') }}
+          STATE_PATH: .alert-state.json
+          EVENT_NAME: ${{ github.event_name }}
         run: node scripts/ton-alert.mjs
+
+      - name: Save alert state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .alert-state.json
+          key: alert-state-v2-${{ github.repository }}
