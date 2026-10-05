@@ -1,9 +1,9 @@
 # GRAM / TON Telegram alerts — runs without the browser
 #
-# Secrets:
-#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (required)
-#   WALLET_ADDRESS, ALERT_ABOVE, ALERT_BELOW, ALERT_PROFIT_PCTS,
-#   ALERT_LOSS_PCTS, STARTING_CAPITAL (optional)
+# Secrets (required):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WALLET_ADDRESS
+# Optional:
+#   ALERT_ABOVE, ALERT_BELOW, ALERT_PROFIT_PCTS, ALERT_LOSS_PCTS
 
 name: GRAM Telegram Alerts
 
@@ -13,13 +13,13 @@ on:
   workflow_dispatch:
     inputs:
       report:
-        description: "Send a full status report even if no threshold hit"
+        description: "Send full status report (manual runs default to yes)"
         required: false
-        default: "false"
+        default: "true"
         type: choice
         options:
-          - "false"
           - "true"
+          - "false"
 
 permissions:
   contents: read
@@ -56,8 +56,10 @@ jobs:
           ALERT_PROFIT_PCTS: ${{ secrets.ALERT_PROFIT_PCTS }}
           ALERT_LOSS_PCTS: ${{ secrets.ALERT_LOSS_PCTS }}
           STARTING_CAPITAL: ${{ secrets.STARTING_CAPITAL }}
-          REPORT: ${{ github.event.inputs.report == 'true' && '1' || '' }}
+          # Manual run → always report unless user picks false
+          REPORT: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.report != 'false') && '1' || (github.event.inputs.report == 'true' && '1' || '') }}
           STATE_PATH: .alert-state.json
+          EVENT_NAME: ${{ github.event_name }}
         run: node scripts/ton-alert.mjs
 
       - name: Save alert state
