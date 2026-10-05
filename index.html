@@ -601,35 +601,23 @@
         return s.gram > 0.5 && s.usdt > 0.5;
       });
     }
-    /** Paginate tonapi events until maxPages or no next_from */
+    /** Simple reliable fetch — same idea as the first working version */
     async function fetchWalletSwaps(addr, maxPages) {
-      const pages = maxPages || 15;
-      let all = [], nextFrom = null;
-      let lastErr = null;
+      // Original path: one solid request. Extra pages only if tonapi gives a real next_from.
+      const pages = Math.min(maxPages || 3, 5);
+      let all = [];
+      let nextFrom = null;
       for (let i = 0; i < pages; i++) {
         let url = "https://tonapi.io/v2/accounts/" + encodeURIComponent(addr) + "/events?limit=100";
-        // tonapi uses before_lt; skip 0 / invalid
-        if (nextFrom != null && Number(nextFrom) > 0) url += "&before_lt=" + nextFrom;
-        try {
-          const j = await fetchJson(url, 25000);
-          const batch = j.events || [];
-          if (!batch.length) break;
-          all = all.concat(batch);
-          const nf = j.next_from;
-          // stop if missing, zero, or unchanged
-          if (nf == null || nf === 0 || nf === "0" || nf === nextFrom) break;
-          nextFrom = nf;
-        } catch (err) {
-          lastErr = err;
-          // if we already have events, return partial instead of hard-fail
-          if (all.length) {
-            console.warn("pagination stopped:", err);
-            break;
-          }
-          throw err;
-        }
+        if (nextFrom) url += "&before_lt=" + nextFrom;
+        const j = await fetchJson(url, 20000);
+        const batch = j.events || [];
+        if (!batch.length) break;
+        all = all.concat(batch);
+        const nf = Number(j.next_from);
+        if (!Number.isFinite(nf) || nf <= 0) break;
+        nextFrom = nf;
       }
-      if (!all.length && lastErr) throw lastErr;
       return parseSwapsFromEvents(all);
     }
     async function fetchWalletBalances(addr) {
@@ -647,21 +635,22 @@
       return walletBal;
     }
     async function syncWallet(force) {
-      if (syncing) return;
-      const addr = (document.getElementById("walletAddr").value || walletAddr || "").trim();
-      if (!addr) { toast("آدرس کیف‌پول را وارد کن"); return; }
-      if (!(/^(EQ|UQ)[A-Za-z0-9_-]{46}$/.test(addr) || /^0:[0-9a-fA-F]{64}$/.test(addr) || addr.length >= 48)) {
-        toast("فرمت آدرس درست نیست (باید با EQ یا UQ شروع شود)");
-        return;
+      if (syncing) {
+        // allow manual retry after 2s if previous hung
+        if (!syncWallet._since || Date.now() - syncWallet._since < 2000) return;
+        syncing = false;
       }
+      const addr = (document.getElementById("walletAddr").value || walletAddr || "").trim().replace(/\s+/g, "");
+      if (!addr || addr.length < 40) { toast("آدرس کیف‌پول را وارد کن"); return; }
       saveWallet(addr);
       syncing = true;
+      syncWallet._since = Date.now();
       const meta = document.getElementById("walletSyncMeta");
       meta.textContent = "در حال خواندن تاریخچه و موجودی…";
       try {
         let bal = null;
         try { bal = await fetchWalletBalances(addr); } catch (_) {}
-        const remote = await fetchWalletSwaps(addr, 15);
+        const remote = await fetchWalletSwaps(addr, 3);
         if (!remote.length) {
           meta.textContent = bal
             ? ("سواپی یافت نشد · زنجیره: " + fmt(bal.ton, 4) + " GRAM · " + fmt(bal.usdt, 2) + " USDT")
