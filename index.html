@@ -490,17 +490,25 @@
     }
     function isUsdt(j) {
       if (!j) return false;
-      const s = (j.symbol || "").toUpperCase();
-      return s.startsWith("USD") || (j.address && j.address.toLowerCase().includes("b113a994"));
+      const s = String(j.symbol || "").toUpperCase();
+      // tonapi may show USD₮
+      if (s.startsWith("USD")) return true;
+      const addr = String(j.address || j.raw_address || "").toLowerCase();
+      return addr.includes("b113a994");
     }
     function parseSwapsFromEvents(events) {
       const out = [];
       for (const e of events || []) {
-        const ts = new Date(e.timestamp * 1000).toISOString();
+        let ts;
+        try {
+          const sec = Number(e.timestamp);
+          if (!Number.isFinite(sec) || sec <= 0) continue;
+          ts = new Date(sec * 1000).toISOString();
+        } catch (_) { continue; }
         const eid = e.event_id || "";
         const actions = e.actions || [];
-        const acct = (e.account && e.account.address || "").toLowerCase();
-        const sameAddr = (a) => (a || "").toLowerCase() === acct;
+        const acct = String((e.account && e.account.address) || "").toLowerCase();
+        const sameAddr = (a) => String(a || "").toLowerCase() === acct;
 
         // --- JettonSwap (STON.fi etc.): amounts are already net of pool fee ---
         for (const a of actions) {
@@ -597,16 +605,31 @@
     async function fetchWalletSwaps(addr, maxPages) {
       const pages = maxPages || 15;
       let all = [], nextFrom = null;
+      let lastErr = null;
       for (let i = 0; i < pages; i++) {
         let url = "https://tonapi.io/v2/accounts/" + encodeURIComponent(addr) + "/events?limit=100";
-        if (nextFrom != null) url += "&before_lt=" + nextFrom;
-        const j = await fetchJson(url, 20000);
-        const batch = j.events || [];
-        if (!batch.length) break;
-        all = all.concat(batch);
-        if (j.next_from == null || j.next_from === nextFrom) break;
-        nextFrom = j.next_from;
+        // tonapi uses before_lt; skip 0 / invalid
+        if (nextFrom != null && Number(nextFrom) > 0) url += "&before_lt=" + nextFrom;
+        try {
+          const j = await fetchJson(url, 25000);
+          const batch = j.events || [];
+          if (!batch.length) break;
+          all = all.concat(batch);
+          const nf = j.next_from;
+          // stop if missing, zero, or unchanged
+          if (nf == null || nf === 0 || nf === "0" || nf === nextFrom) break;
+          nextFrom = nf;
+        } catch (err) {
+          lastErr = err;
+          // if we already have events, return partial instead of hard-fail
+          if (all.length) {
+            console.warn("pagination stopped:", err);
+            break;
+          }
+          throw err;
+        }
       }
+      if (!all.length && lastErr) throw lastErr;
       return parseSwapsFromEvents(all);
     }
     async function fetchWalletBalances(addr) {
@@ -626,7 +649,11 @@
     async function syncWallet(force) {
       if (syncing) return;
       const addr = (document.getElementById("walletAddr").value || walletAddr || "").trim();
-      if (!addr || addr.length < 40) { toast("آدرس کیف‌پول را وارد کن"); return; }
+      if (!addr) { toast("آدرس کیف‌پول را وارد کن"); return; }
+      if (!(/^(EQ|UQ)[A-Za-z0-9_-]{46}$/.test(addr) || /^0:[0-9a-fA-F]{64}$/.test(addr) || addr.length >= 48)) {
+        toast("فرمت آدرس درست نیست (باید با EQ یا UQ شروع شود)");
+        return;
+      }
       saveWallet(addr);
       syncing = true;
       const meta = document.getElementById("walletSyncMeta");
@@ -697,7 +724,7 @@
         // sort by date ascending
         trades.sort((a, b) => new Date(a.date) - new Date(b.date));
         saveTrades();
-        render();
+        try { render(); } catch (re) { console.error("render after sync", re); }
         let balTxt = "";
         if (bal) {
           balTxt = " · زنجیره: " + fmt(bal.ton, 4) + " GRAM / " + fmt(bal.usdt, 2) + " USDT";
@@ -709,9 +736,16 @@
         meta.textContent = remote.length + " سواپ · +" + added + " · ↻" + updated + balTxt;
         toast(added ? (added + " سواپ جدید اضافه شد") : (updated ? "سواپ‌ها به‌روز شدند" : "همه سواپ‌ها قبلاً ثبت شده‌اند"));
       } catch (err) {
-        meta.textContent = "خطا در همگام‌سازی";
-        toast("خطا در خواندن کیف‌پول — کمی بعد دوباره تلاش کن");
         console.error(err);
+        const msg = (err && err.message) ? String(err.message) : "خطای ناشناخته";
+        let human = "خطا در خواندن کیف‌پول";
+        if (/HTTP 429/.test(msg)) human = "محدودیت tonapi — ۳۰ ثانیه بعد دوباره بزن";
+        else if (/HTTP 400/.test(msg)) human = "آدرس کیف‌پول نامعتبر است";
+        else if (/HTTP 404/.test(msg)) human = "این آدرس در شبکه پیدا نشد";
+        else if (/abort|AbortError|timeout/i.test(msg)) human = "زمان تمام شد — دوباره تلاش کن";
+        else if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) human = "دسترسی شبکه/CORS — صفحه را با GitHub Pages یا یک سرور محلی باز کن (نه file://)";
+        meta.textContent = "خطا: " + human;
+        toast(human + " (" + msg.slice(0, 80) + ")");
       } finally {
         syncing = false;
       }
@@ -904,12 +938,16 @@
 
     async function fetchJson(url, ms) {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), ms || 8000);
+      const timer = setTimeout(() => ctrl.abort(), ms || 8000);
       try {
         const res = await fetch(url, { signal: ctrl.signal, headers: { accept: "application/json" } });
-        if (!res.ok) throw new Error("HTTP " + res.status);
+        if (!res.ok) {
+          let extra = "";
+          try { const t = await res.text(); extra = t.slice(0, 120); } catch (_) {}
+          throw new Error("HTTP " + res.status + (extra ? (" " + extra) : ""));
+        }
         return await res.json();
-      } finally { clearTimeout(t); }
+      } finally { clearTimeout(timer); }
     }
 
     async function fromKraken() {
