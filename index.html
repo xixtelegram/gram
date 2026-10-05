@@ -10,7 +10,948 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles/app.css" />
+  <style>
+    :root {
+      --bg: #070a0e;
+      --surface: rgba(22, 28, 38, 0.72);
+      --surface-solid: #161c26;
+      --surface-2: rgba(18, 23, 31, 0.78);
+      --surface-2-solid: #12171f;
+      --surface-3: rgba(28, 36, 48, 0.65);
+      --fg: #f0f3f6;
+      --muted: #9aabbf;
+      --primary: #14b8a6;
+      --primary-fg: #042f2e;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-strong: rgba(255, 255, 255, 0.14);
+      --profit: #34d399;
+      --loss: #f87171;
+      --radius: 22px;
+      --radius-sm: 14px;
+      --radius-xs: 10px;
+      --glass-blur: 24px;
+      --glass-sat: 160%;
+      --shadow-glass: 0 8px 32px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      --shadow-btn: 0 4px 16px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+    * { box-sizing: border-box; }
+    html {
+      /* respect user text size (Dynamic Type-like) */
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+    html, body {
+      margin: 0;
+      min-height: 100dvh;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: Vazirmatn, "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    /* subtle depth gradient for glass to refract against */
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 50% at 20% -10%, rgba(20, 184, 166, 0.12), transparent 50%),
+        radial-gradient(ellipse 60% 40% at 90% 20%, rgba(59, 130, 246, 0.07), transparent 45%),
+        radial-gradient(ellipse 50% 30% at 50% 100%, rgba(20, 184, 166, 0.05), transparent 40%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    /* Skip link — first focusable for keyboard users */
+    .skip-link {
+      position: absolute;
+      inset-inline-start: 12px;
+      top: -100px;
+      z-index: 100;
+      background: var(--primary);
+      color: var(--primary-fg);
+      padding: 10px 16px;
+      border-radius: 12px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: top .2s;
+    }
+    .skip-link:focus {
+      top: 12px;
+      outline: 3px solid #fff;
+      outline-offset: 2px;
+    }
+    .sr-only {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      padding: 0 !important;
+      margin: -1px !important;
+      overflow: hidden !important;
+      clip: rect(0, 0, 0, 0) !important;
+      white-space: nowrap !important;
+      border: 0 !important;
+    }
+    button:not(:disabled), [role="button"]:not(:disabled), label[for] { cursor: pointer; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    a { color: var(--primary); }
+    /* Focus ring — keyboard only (iOS-like, high contrast) */
+    :focus { outline: none; }
+    :focus-visible {
+      outline: 3px solid rgba(20, 184, 166, 0.85);
+      outline-offset: 2px;
+    }
+    .btn:focus-visible,
+    .btn-icon:focus-visible,
+    input:focus-visible,
+    .target:focus-visible,
+    .seg button:focus-visible,
+    .chart-btns button:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid rgba(20, 184, 166, 0.85);
+      outline-offset: 2px;
+    }
+    /* Min touch target 44×44pt (switches use fixed visual size separately) */
+    .btn, .btn-icon, .seg button, .chart-btns button {
+      min-height: 44px;
+      min-width: 44px;
+    }
+    .btn-sm, .btn-xs { min-height: 32px; min-width: 32px; }
+    .wrap {
+      position: relative;
+      z-index: 1;
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 16px 16px 80px;
+    }
+    /* Floating glass header (functional layer) */
+    header.top {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+      padding: 12px 14px;
+      border-radius: var(--radius);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-glass);
+      -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+      backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+      position: sticky;
+      top: 10px;
+      z-index: 20;
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      header.top { background: var(--surface-solid); }
+    }
+    .brand { display: flex; gap: 12px; align-items: center; }
+    .logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 13px;
+      background: linear-gradient(145deg, #2dd4bf, #0d9488);
+      color: var(--primary-fg);
+      display: grid;
+      place-items: center;
+      box-shadow: 0 6px 20px rgba(20, 184, 166, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    }
+    h1 { margin: 0; font-size: 1.12rem; font-weight: 800; letter-spacing: -.02em; }
+    .sub { margin: 0; font-size: 12px; color: var(--muted); }
+    h2 { margin: 0 0 12px; font-size: 1rem; font-weight: 700; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; }
+    /* Content-layer cards: soft glass, high readability */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: var(--shadow-glass);
+      -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+      backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      .card { background: var(--surface-solid); }
+    }
+    .muted { color: var(--muted); font-size: 12px; }
+    .price {
+      font-size: 2.1rem;
+      font-weight: 800;
+      letter-spacing: -.03em;
+      font-variant-numeric: tabular-nums;
+      margin: 4px 0 0;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid transparent;
+    }
+    .up {
+      background: rgba(16, 185, 129, 0.18);
+      color: var(--profit);
+      border-color: rgba(16, 185, 129, 0.25);
+    }
+    .down {
+      background: rgba(239, 68, 68, 0.16);
+      color: var(--loss);
+      border-color: rgba(239, 68, 68, 0.25);
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin: 12px 0 20px;
+    }
+    @media (min-width: 700px) { .stats { grid-template-columns: repeat(4, 1fr); } }
+    .stats.three { grid-template-columns: 1fr 1fr; }
+    @media (min-width: 700px) { .stats.three { grid-template-columns: repeat(3, 1fr); } }
+    .stat-tile {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 14px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-height: 78px;
+      -webkit-backdrop-filter: blur(16px) saturate(140%);
+      backdrop-filter: blur(16px) saturate(140%);
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      .stat-tile { background: var(--surface-2-solid); }
+    }
+    .stat-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: -0.01em;
+    }
+    .stat-v {
+      margin: 2px 0 0;
+      font-size: 1.2rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+      line-height: 1.25;
+    }
+    .stat-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      line-height: 1.4;
+    }
+    .profit { color: var(--profit); }
+    .loss { color: var(--loss); }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+    input, select {
+      width: 100%;
+      height: 46px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-strong);
+      background: var(--surface-2);
+      color: var(--fg);
+      padding: 0 14px;
+      font: inherit;
+      outline: none;
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+      transition: border-color .2s, box-shadow .2s;
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      input, select { background: var(--surface-2-solid); }
+    }
+    input:focus {
+      border-color: rgba(20, 184, 166, 0.55);
+      box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.18);
+    }
+    /* Glass controls */
+    .btn {
+      height: 44px;
+      border: 0;
+      border-radius: var(--radius-sm);
+      padding: 0 16px;
+      font: inherit;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: transform .15s ease, box-shadow .2s, background .2s, opacity .2s;
+    }
+    .btn:active:not(:disabled) { transform: scale(0.97); }
+    .btn-primary {
+      background: linear-gradient(160deg, #2dd4bf 0%, #0f766e 100%);
+      color: var(--primary-fg);
+      width: 100%;
+      box-shadow: 0 6px 20px rgba(20, 184, 166, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .btn-ghost {
+      background: var(--surface-3);
+      color: var(--fg);
+      border: 1px solid var(--border-strong);
+      box-shadow: var(--shadow-btn);
+      -webkit-backdrop-filter: blur(16px) saturate(150%);
+      backdrop-filter: blur(16px) saturate(150%);
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      .btn-ghost { background: #1c2430; }
+    }
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.16);
+      color: var(--loss);
+      border: 1px solid rgba(239, 68, 68, 0.28);
+      box-shadow: var(--shadow-btn);
+    }
+    .seg {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      background: var(--surface-2);
+      padding: 5px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      margin-bottom: 14px;
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+    }
+    .seg button {
+      height: 40px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 700;
+      transition: background .2s, color .2s;
+    }
+    .seg button.on-buy { background: rgba(16, 185, 129, 0.2); color: var(--profit); }
+    .seg button.on-sell { background: rgba(239, 68, 68, 0.18); color: var(--loss); }
+    .grid2 { display: grid; gap: 12px; }
+    @media (min-width: 640px) { .grid2 { grid-template-columns: 1fr 1fr; } }
+    .target {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 4.5rem 1fr auto;
+      gap: 12px;
+      align-items: center;
+      text-align: right;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      color: inherit;
+      font: inherit;
+      transition: border-color .2s, background .2s, transform .15s;
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+    }
+    .target:hover { border-color: rgba(20, 184, 166, 0.45); background: rgba(20, 184, 166, 0.06); }
+    .target:active { transform: scale(0.985); }
+    /* iOS-style continuous list for history */
+    #history.list-card,
+    .list-card {
+      padding: 0;
+      overflow: hidden;
+    }
+    .hist {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      align-items: start;
+      padding: 14px 16px;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+    }
+    .hist-sep {
+      border-bottom: 1px solid var(--border);
+    }
+    .hist-body { min-width: 0; }
+    .hist-title {
+      margin: 0;
+      font-weight: 700;
+      font-size: 15px;
+      line-height: 1.35;
+      letter-spacing: -0.01em;
+    }
+    .hist-amount {
+      margin: 2px 0 0;
+      font-size: 13px;
+      color: var(--fg);
+      opacity: 0.9;
+    }
+    .hist-sub {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .hist-meta {
+      text-align: left;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+    }
+    .hist-price {
+      margin: 0;
+      font-weight: 800;
+      font-size: 15px;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+    }
+    .hist-price-label {
+      margin: 0;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .badge {
+      width: auto;
+      min-width: 52px;
+      height: auto;
+      padding: 7px 10px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.25;
+      text-align: center;
+      align-self: start;
+    }
+    .btn-xs {
+      height: 28px !important;
+      padding: 0 10px !important;
+      font-size: 12px !important;
+      border-radius: 8px !important;
+      margin-top: 4px;
+    }
+    .chart-box { height: 220px; position: relative; }
+    canvas { width: 100%; height: 100%; display: block; }
+    .chart-btns { display: flex; gap: 6px; margin-bottom: 10px; }
+    .chart-btns button {
+      height: 34px;
+      padding: 0 12px;
+      font-size: 12px;
+      border-radius: 10px;
+    }
+    .chart-btns button.on {
+      background: linear-gradient(160deg, #2dd4bf, #0f766e);
+      color: var(--primary-fg);
+      border-color: transparent;
+      box-shadow: 0 4px 12px rgba(20, 184, 166, 0.25);
+    }
+    /* Fixed-size iOS-like switch — stable across browsers/zoom */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 51px;
+      height: 31px;
+      min-width: 51px;
+      min-height: 31px;
+      max-width: 51px;
+      max-height: 31px;
+      flex: 0 0 51px;
+      flex-shrink: 0;
+      vertical-align: middle;
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    .switch input {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      opacity: 0;
+      cursor: pointer;
+      z-index: 2;
+    }
+    .slider {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--surface-3);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      transition: background .2s, border-color .2s;
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.25);
+      box-sizing: border-box;
+      pointer-events: none;
+    }
+    .slider:before {
+      content: "";
+      position: absolute;
+      width: 25px;
+      height: 25px;
+      right: 2px;
+      top: 2px;
+      background: #c5d0dc;
+      border-radius: 50%;
+      transition: transform .2s;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+      box-sizing: border-box;
+    }
+    .switch input:checked + .slider {
+      background: linear-gradient(135deg, #2dd4bf, #0d9488);
+      border-color: transparent;
+    }
+    .switch input:checked + .slider:before {
+      transform: translateX(-20px);
+      background: #fff;
+    }
+    .switch-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      margin-top: 14px;
+      flex-wrap: nowrap;
+    }
+    .switch-row > div {
+      flex: 1;
+      min-width: 0;
+    }
+    .switch-row .switch {
+      align-self: center;
+    }
+    /* Floating glass toast */
+    .toast {
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      color: var(--fg);
+      padding: 12px 18px;
+      border-radius: 16px;
+      font-size: 13px;
+      font-weight: 600;
+      z-index: 40;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      -webkit-backdrop-filter: blur(28px) saturate(180%);
+      backdrop-filter: blur(28px) saturate(180%);
+      display: none;
+      max-width: calc(100% - 32px);
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      .toast { background: var(--surface-solid); }
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(8px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 30;
+      padding: 16px;
+    }
+    .modal.on {
+      display: flex;
+    }
+    .modal[hidden] { display: none !important; }
+    .modal.on[hidden] { display: flex !important; }
+    /* Visual priority helpers */
+    .priority-high .price { font-size: 2.25rem; }
+    .priority-low { opacity: 0.97; }
+    .modal .card,
+    .modal > div {
+      border-radius: var(--radius);
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+    .hidden { display: none !important; }
+    .empty { text-align: center; color: var(--muted); padding: 32px 8px; font-size: 14px; }
+    .sim {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      text-align: center;
+      margin-top: 14px;
+      padding: 12px;
+      background: var(--surface-2);
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+    }
+    .sim b {
+      display: block;
+      font-size: 1.15rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+      margin-bottom: 2px;
+    }
+    .sim .muted { font-size: 11px; }
+    footer {
+      text-align: center;
+      margin-top: 32px;
+      padding-top: 8px;
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.75;
+      opacity: 0.85;
+    }
+    .sec { margin-bottom: 16px; }
+    .sec-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .sec-head-icon {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .sec-head-text {
+      flex: 1;
+      min-width: 0;
+    }
+    .sec-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      flex: none;
+      display: grid;
+      place-items: center;
+      background: rgba(20, 184, 166, 0.14);
+      color: var(--primary);
+      border: 1px solid rgba(20, 184, 166, 0.22);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+    .sec-icon.wallet-icon {
+      background: rgba(20, 184, 166, 0.18);
+      color: #2dd4bf;
+    }
+    .sec-icon.price-icon {
+      background: rgba(251, 191, 36, 0.12);
+      color: #fbbf24;
+      border-color: rgba(251, 191, 36, 0.22);
+    }
+    .sec-icon.portfolio-icon {
+      background: rgba(52, 211, 153, 0.12);
+      color: #34d399;
+      border-color: rgba(52, 211, 153, 0.22);
+    }
+    .sec-icon.advice-icon {
+      background: rgba(96, 165, 250, 0.14);
+      color: #60a5fa;
+      border-color: rgba(96, 165, 250, 0.25);
+    }
+    .sec-icon.chart-icon {
+      background: rgba(167, 139, 250, 0.14);
+      color: #a78bfa;
+      border-color: rgba(167, 139, 250, 0.25);
+    }
+    .sec-icon.history-icon {
+      background: rgba(148, 163, 184, 0.14);
+      color: #94a3b8;
+      border-color: rgba(148, 163, 184, 0.22);
+    }
+    .sec-title {
+      margin: 0;
+      font-size: 1.08rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .help {
+      margin: 4px 0 0;
+      font-size: 12.5px;
+      color: var(--muted);
+      line-height: 1.55;
+      max-width: 48ch;
+    }
+    .wallet-card {
+      border-color: rgba(20, 184, 166, 0.28);
+      box-shadow: var(--shadow-glass), 0 0 0 1px rgba(20, 184, 166, 0.08);
+    }
+    .wallet-bal {
+      margin: 14px 0 0;
+      font-size: 13px;
+      line-height: 1.65;
+      min-height: 1.2em;
+    }
+    .history-card .list-card {
+      margin: 0 -18px -18px;
+      border-radius: 0 0 var(--radius) var(--radius);
+      border-top: 1px solid var(--border);
+      background: transparent;
+    }
+    .history-card #history:empty,
+    .history-card #history .empty-state {
+      margin: 0;
+      border: 0;
+      border-radius: 0;
+    }
+    /* Grouped form feel */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .form-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: flex-end;
+      margin-top: 14px;
+    }
+    .callout {
+      background: rgba(20, 184, 166, 0.1);
+      border: 1px solid rgba(20, 184, 166, 0.28);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      font-size: 13px;
+      line-height: 1.7;
+      margin-top: 12px;
+    }
+    .callout.warn {
+      background: rgba(245, 158, 11, 0.1);
+      border-color: rgba(245, 158, 11, 0.35);
+      color: #fbbf24;
+    }
+    .callout.info {
+      background: rgba(59, 130, 246, 0.1);
+      border-color: rgba(59, 130, 246, 0.28);
+    }
+    .empty-state {
+      text-align: center;
+      padding: 28px 16px;
+      border: 1px dashed var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--surface-2);
+    }
+    .empty-state h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    .empty-state p { margin: 0 auto; max-width: 36ch; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    details.adv {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 18px;
+      overflow: hidden;
+      box-shadow: var(--shadow-glass);
+      -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+      backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+    }
+    @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+      details.adv { background: var(--surface-solid); }
+    }
+    details.adv > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 800;
+      font-size: 0.98rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      user-select: none;
+    }
+    .adv-summary-inner {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    details.adv .sec-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+    }
+    .sec-icon.tg-icon {
+      background: rgba(56, 189, 248, 0.14);
+      color: #38bdf8;
+      border-color: rgba(56, 189, 248, 0.25);
+    }
+    .sec-icon.manual-icon {
+      background: rgba(251, 146, 60, 0.12);
+      color: #fb923c;
+      border-color: rgba(251, 146, 60, 0.25);
+    }
+    details.adv > summary::-webkit-details-marker { display: none; }
+    details.adv > summary::after {
+      content: "▼";
+      font-size: 11px;
+      color: var(--muted);
+      transition: .2s;
+    }
+    details.adv[open] > summary::after { transform: rotate(-180deg); }
+    details.adv .adv-body {
+      padding: 0 18px 18px;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+    }
+    .summary-sub {
+      font-weight: 500;
+      font-size: 12px;
+      color: var(--muted);
+      display: block;
+      margin-top: 4px;
+    }
+    .price-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    .top-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .btn-icon {
+      width: 40px;
+      height: 40px !important;
+      padding: 0 !important;
+      border-radius: 12px !important;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--fg);
+    }
+    .btn-icon svg {
+      display: block;
+      flex: none;
+      opacity: 0.92;
+    }
+    .btn-icon:active svg { opacity: 1; }
+    .wallet-trigger {
+      position: relative;
+      color: var(--primary);
+    }
+    .wallet-trigger .wallet-dot {
+      position: absolute;
+      top: 6px;
+      inset-inline-end: 6px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--profit);
+      box-shadow: 0 0 0 2px var(--surface-solid);
+    }
+    .wallet-trigger.is-connected {
+      border-color: rgba(20, 184, 166, 0.35);
+      background: rgba(20, 184, 166, 0.12);
+    }
+    .wallet-sheet .wallet-sheet-card {
+      max-width: 440px;
+      width: 100%;
+      max-height: min(90dvh, 640px);
+      overflow: auto;
+    }
+    .btn-sm {
+      height: 34px !important;
+      padding: 0 12px !important;
+      font-size: 12px !important;
+      border-radius: 10px !important;
+    }
+    .advice-card {
+      border-color: rgba(20, 184, 166, 0.4) !important;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(20, 184, 166, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+    }
+    .advice-main {
+      margin: 0;
+      font-weight: 700;
+      font-size: 1.08rem;
+      line-height: 1.7;
+      letter-spacing: -0.01em;
+    }
+    .targets-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .sim-block {
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    .sim-title {
+      margin: 0 0 6px;
+      font-weight: 700;
+      font-size: 0.95rem;
+      letter-spacing: -0.01em;
+    }
+    .list-card {
+      padding: 0 !important;
+      overflow: hidden;
+    }
+    .chart-btns.segmented {
+      background: var(--surface-2);
+      padding: 3px;
+      border-radius: 11px;
+      border: 1px solid var(--border);
+      gap: 2px;
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+    }
+    .chart-btns.segmented button {
+      height: 30px;
+      min-width: 40px;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+    }
+    .chart-btns.segmented button.on {
+      background: rgba(255, 255, 255, 0.12);
+      color: var(--fg);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    }
+    @media (max-width: 640px) {
+      .hist {
+        grid-template-columns: auto 1fr;
+        gap: 10px 12px;
+      }
+      .hist-meta {
+        grid-column: 2;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 8px 12px;
+        margin-top: 2px;
+      }
+      .hist-price-label { display: none; }
+      .badge { justify-self: start; }
+      header.top { top: 6px; padding: 10px 12px; }
+      .sec-head-icon {
+        gap: 10px;
+      }
+      .sec-icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 11px;
+      }
+      .sec-head-icon .chart-btns {
+        width: 100%;
+        justify-content: stretch;
+        order: 3;
+      }
+      .sec-head-icon .chart-btns button {
+        flex: 1;
+      }
+    }
+    /* Prefer reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      .btn, .slider, .slider:before, details.adv > summary::after { transition: none; }
+      .btn:active:not(:disabled) { transform: none; }
+    }
+  </style>
 </head>
 <body>
   <a class="skip-link" href="#mainApp">پرش به محتوای اصلی</a>
@@ -292,6 +1233,1600 @@
     </div>
   </div>
 
-  <script type="module" src="scripts/app.mjs"></script>
+  <script>
+  (function () {
+    // ROUND = safety margin on advice only (not P&L)
+    const ROUND = 0.2, STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
+    const SEED = [];
+    const KEY = "gram_trades_v2", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1", WKEY = "gram_wallet_addr_v1", SERIESKEY = "gram_price_series_v1";
+    const DEFAULT_WALLET = ""; // no default — user must paste their own address
+    const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
+    // Noise as fraction of price (1.2%); floor avoids zero at tiny prices
+    const NOISE_PCT = 0.012, NOISE_FLOOR = 0.008;
+    const MIN_ACTION_PCT = 0.5; // min edge over BE before suggesting sell/buy
+    // Rough pool TON reserve for slippage estimate (updated from STON when available)
+    let poolTonReserve = 1.7e6;
+
+    let trades = loadTrades();
+    let tg = loadTg();
+    let walletAddr = loadWallet();
+    let live = null, quote = null, cexPrice = null, dexPrice = null;
+    let walletBal = null; // { ton, usdt, at } — source of truth for balances
+    let tradeType = "buy", chartDays = 7, chartPts = [], confirmFn = null, fetching = false, syncing = false;
+
+    function noiseAbs(price) {
+      const p = price || live || 1;
+      return Math.max(NOISE_FLOOR, p * NOISE_PCT);
+    }
+    /** Simple constant-product slippage estimate for selling `gram` into pool */
+    function estSlippagePct(gram) {
+      const r = poolTonReserve || 1e6;
+      if (!gram || gram <= 0) return 0;
+      // Δp/p ≈ Δx / (x+Δx) for small trades on xy=k when swapping x→y
+      return Math.min(8, (gram / (r + gram)) * 100);
+    }
+    function estExecSellPrice(mid, gram) {
+      const slip = estSlippagePct(gram) / 100;
+      return mid * (1 - slip);
+    }
+    function estExecBuyPrice(mid, usdt) {
+      const gramApprox = mid > 0 ? usdt / mid : 0;
+      const slip = estSlippagePct(gramApprox) / 100;
+      return mid * (1 + slip);
+    }
+
+    function fmt(n, d) {
+      if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
+      const x = Number(n);
+      if (!Number.isFinite(x)) return "—";
+      try {
+        return x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+      } catch (_) {
+        return x.toFixed(d);
+      }
+    }
+    function faDate(iso) {
+      try { return new Date(iso).toLocaleString("fa-IR", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
+      catch { return iso; }
+    }
+    function toast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg; el.style.display = "block";
+      clearTimeout(toast._t); toast._t = setTimeout(() => { el.style.display = "none"; }, 2800);
+    }
+    function loadTrades() {
+      try {
+        const raw = localStorage.getItem(KEY) || localStorage.getItem("gram_trades_v1");
+        const p = raw ? JSON.parse(raw) : null;
+        return Array.isArray(p) ? p : SEED.slice();
+      } catch { return SEED.slice(); }
+    }
+    function saveTrades() { localStorage.setItem(KEY, JSON.stringify(trades)); }
+    function loadWallet() {
+      try { return localStorage.getItem(WKEY) || ""; } catch { return ""; }
+    }
+    function saveWallet(a) {
+      walletAddr = (a || "").trim();
+      localStorage.setItem(WKEY, walletAddr);
+    }
+    function toLocalDatetime(iso) {
+      const d = new Date(iso);
+      const pad = (n) => String(n).padStart(2, "0");
+      return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    }
+    function isUsdt(j) {
+      if (!j) return false;
+      const s = String(j.symbol || "").toUpperCase();
+      // tonapi may show USD₮
+      if (s.startsWith("USD")) return true;
+      const addr = String(j.address || j.raw_address || "").toLowerCase();
+      return addr.includes("b113a994");
+    }
+    function parseSwapsFromEvents(events) {
+      const out = [];
+      for (const e of events || []) {
+        let ts;
+        try {
+          const sec = Number(e.timestamp);
+          if (!Number.isFinite(sec) || sec <= 0) continue;
+          ts = new Date(sec * 1000).toISOString();
+        } catch (_) { continue; }
+        const eid = e.event_id || "";
+        const actions = e.actions || [];
+        const acct = String((e.account && e.account.address) || "").toLowerCase();
+        const sameAddr = (a) => String(a || "").toLowerCase() === acct;
+
+        // --- JettonSwap (STON.fi etc.): amounts are already net of pool fee ---
+        for (const a of actions) {
+          if (a.status && a.status !== "ok") continue;
+          if (a.type !== "JettonSwap") continue;
+          const js = a.JettonSwap || {};
+          if (isUsdt(js.jetton_master_in) && js.ton_out) {
+            const usdt = Number(js.amount_in) / 1e6;
+            const gram = Number(js.ton_out) / 1e9;
+            if (usdt > 0.01 && gram > 0.01) {
+              out.push({
+                type: "buy", date: toLocalDatetime(ts), gram, usdt,
+                networkFee: 0, dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet"
+              });
+            }
+          } else if (isUsdt(js.jetton_master_out) && js.ton_in) {
+            const usdt = Number(js.amount_out) / 1e6;
+            const gram = Number(js.ton_in) / 1e9;
+            if (usdt > 0.01 && gram > 0.01) {
+              out.push({
+                type: "sell", date: toLocalDatetime(ts), gram, usdt,
+                networkFee: 0, dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet"
+              });
+            }
+          }
+        }
+        if (actions.some((a) => a.type === "JettonSwap")) continue;
+
+        // --- Omniston / multi-leg: measure exact net cashflows of the wallet ---
+        // Also capture intermediate USDT that left the route (DEX fee) and small TON refunds (gas).
+        let tonIn = 0, tonOut = 0, usdtIn = 0, usdtOut = 0;
+        let usdtRoute = 0; // USDT seen in non-user legs (for fee estimate)
+        for (const a of actions) {
+          if (a.status && a.status !== "ok") continue;
+          if (a.type === "TonTransfer") {
+            const tt = a.TonTransfer || {};
+            const amt = Number(tt.amount || 0) / 1e9;
+            if (sameAddr(tt.sender && tt.sender.address)) tonOut += amt;
+            if (sameAddr(tt.recipient && tt.recipient.address)) tonIn += amt;
+          }
+          if (a.type === "JettonTransfer") {
+            const jt = a.JettonTransfer || {};
+            if (!isUsdt(jt.jetton)) continue;
+            const amt = Number(jt.amount || 0) / 1e6;
+            const fromU = sameAddr(jt.sender && jt.sender.address);
+            const toU = sameAddr(jt.recipient && jt.recipient.address);
+            if (fromU) usdtOut += amt;
+            if (toU) usdtIn += amt;
+            if (!fromU && !toU) usdtRoute = Math.max(usdtRoute, amt);
+          }
+        }
+
+        // event.extra ≈ fee-related nanoton delta
+        const extraTon = typeof e.extra === "number" ? Math.abs(e.extra) / 1e9 : 0;
+
+        if (tonOut > 1 && usdtIn > 0.5 && tonOut > tonIn) {
+          // sell GRAM → USDT
+          // Swap size ≈ large outbound; small inbound is gas refund (not "unsold GRAM")
+          const refund = tonIn < 0.5 ? tonIn : 0;
+          const gramSwapped = tonOut; // amount sent into swap route
+          const gramInv = tonOut - refund; // net inventory leave
+          const usdt = usdtIn - usdtOut;
+          const dexFeeUsdt = usdtRoute > usdt ? +(usdtRoute - usdt).toFixed(6) : 0;
+          const networkFee = +(Math.max(extraTon, refund > 0 ? 0 : 0)).toFixed(9);
+          out.push({
+            type: "sell", date: toLocalDatetime(ts),
+            gram: +gramInv.toFixed(9),
+            gramSwapped: +gramSwapped.toFixed(9),
+            usdt: +usdt.toFixed(6),
+            networkFee, dexFeeUsdt, exact: true, eventId: eid, source: "wallet"
+          });
+        } else if (tonIn > 1 && usdtOut > 0.5 && tonIn > tonOut) {
+          // buy GRAM with USDT
+          const gasOut = tonOut < 0.5 ? tonOut : 0;
+          const gram = tonIn - (tonOut > 0.5 ? tonOut : 0); // net GRAM received
+          const usdt = usdtOut - usdtIn;
+          const networkFee = +Math.max(extraTon, gasOut).toFixed(9);
+          out.push({
+            type: "buy", date: toLocalDatetime(ts),
+            gram: +gram.toFixed(9), usdt: +usdt.toFixed(6),
+            networkFee, dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet"
+          });
+        }
+      }
+      const seen = new Set();
+      return out.filter((s) => {
+        const k = s.eventId || (s.date + s.type + s.gram.toFixed(4));
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return s.gram > 0.5 && s.usdt > 0.5;
+      });
+    }
+    /** Simple reliable fetch — same idea as the first working version */
+    async function fetchWalletSwaps(addr, maxPages) {
+      // Original path: one solid request. Extra pages only if tonapi gives a real next_from.
+      const pages = Math.min(maxPages || 3, 5);
+      let all = [];
+      let nextFrom = null;
+      for (let i = 0; i < pages; i++) {
+        let url = "https://tonapi.io/v2/accounts/" + encodeURIComponent(addr) + "/events?limit=100";
+        if (nextFrom) url += "&before_lt=" + nextFrom;
+        const j = await fetchJson(url, 20000);
+        const batch = j.events || [];
+        if (!batch.length) break;
+        all = all.concat(batch);
+        const nf = Number(j.next_from);
+        if (!Number.isFinite(nf) || nf <= 0) break;
+        nextFrom = nf;
+      }
+      return parseSwapsFromEvents(all);
+    }
+    async function fetchWalletBalances(addr) {
+      const acc = await fetchJson("https://tonapi.io/v2/accounts/" + encodeURIComponent(addr), 12000);
+      const ton = Number(acc.balance || 0) / 1e9;
+      let usdt = 0;
+      try {
+        const jets = await fetchJson("https://tonapi.io/v2/accounts/" + encodeURIComponent(addr) + "/jettons?currencies=usd", 12000);
+        for (const b of jets.balances || []) {
+          const j = b.jetton || {};
+          if (isUsdt(j)) usdt += Number(b.balance || 0) / Math.pow(10, j.decimals || 6);
+        }
+      } catch (_) {}
+      walletBal = { ton, usdt, at: Date.now() };
+      return walletBal;
+    }
+    async function syncWallet(force) {
+      if (syncing) {
+        // allow manual retry after 2s if previous hung
+        if (!syncWallet._since || Date.now() - syncWallet._since < 2000) return;
+        syncing = false;
+      }
+      const addr = (document.getElementById("walletAddr").value || walletAddr || "").trim().replace(/\s+/g, "");
+      if (!addr || addr.length < 40) { toast("آدرس کیف‌پول را وارد کن"); return; }
+      saveWallet(addr);
+      syncing = true;
+      syncWallet._since = Date.now();
+      const meta = document.getElementById("walletSyncMeta");
+      meta.textContent = "در حال خواندن تاریخچه و موجودی…";
+      try {
+        let bal = null;
+        try { bal = await fetchWalletBalances(addr); } catch (_) {}
+        const remote = await fetchWalletSwaps(addr, 3);
+        if (!remote.length) {
+          meta.textContent = bal
+            ? ("سواپی یافت نشد · زنجیره: " + fmt(bal.ton, 4) + " GRAM · " + fmt(bal.usdt, 2) + " USDT")
+            : "سواپی یافت نشد";
+          toast("سواپ GRAM/USDT در تاریخچه پیدا نشد");
+          render();
+          return;
+        }
+        // merge: keep manual trades, add/update wallet ones by eventId or close date+amounts
+        const existingIds = new Set(trades.filter((t) => t.eventId).map((t) => t.eventId));
+        let added = 0, updated = 0;
+        for (const s of remote) {
+          if (s.eventId && existingIds.has(s.eventId)) {
+            // refresh exact fields on existing wallet trade
+            const ex = trades.find((t) => t.eventId === s.eventId);
+            if (ex) {
+              ex.gram = s.gram; ex.usdt = s.usdt; ex.gramSwapped = s.gramSwapped;
+              ex.price = s.usdt / (s.gramSwapped || s.gram);
+              ex.networkFee = s.networkFee || 0; ex.dexFeeUsdt = s.dexFeeUsdt || 0;
+              ex.exact = true; ex.source = "wallet";
+            }
+            continue;
+          }
+          // fuzzy match existing manual entry → upgrade to exact wallet data
+          const match = trades.find((t) => !t.eventId && t.type === s.type &&
+            Math.abs(new Date(t.date) - new Date(s.date)) < 3600e3 &&
+            Math.abs(t.gram - s.gram) / s.gram < 0.03 &&
+            Math.abs(t.usdt - s.usdt) / s.usdt < 0.03);
+          if (match) {
+            match.eventId = s.eventId;
+            match.source = "wallet";
+            match.exact = true;
+            match.gram = s.gram;
+            match.usdt = s.usdt;
+            match.gramSwapped = s.gramSwapped;
+            match.price = s.usdt / (s.gramSwapped || s.gram);
+            match.networkFee = s.networkFee || 0;
+            match.dexFeeUsdt = s.dexFeeUsdt || 0;
+            delete match.dexFeePct;
+            updated++;
+            continue;
+          }
+          trades.push({
+            id: Date.now() + added,
+            type: s.type,
+            date: s.date,
+            gram: s.gram,
+            gramSwapped: s.gramSwapped,
+            usdt: s.usdt,
+            networkFee: s.networkFee || 0,
+            dexFeeUsdt: s.dexFeeUsdt || 0,
+            exact: true,
+            price: s.usdt / (s.gramSwapped || s.gram),
+            eventId: s.eventId,
+            source: "wallet"
+          });
+          existingIds.add(s.eventId);
+          added++;
+        }
+        // sort by date ascending
+        trades.sort((a, b) => new Date(a.date) - new Date(b.date));
+        saveTrades();
+        try { render(); } catch (re) { console.error("render after sync", re); }
+        let balTxt = "";
+        if (bal) {
+          balTxt = " · زنجیره: " + fmt(bal.ton, 4) + " GRAM / " + fmt(bal.usdt, 2) + " USDT";
+          const s = calcState(trades, live);
+          if (s.bookGram != null && Math.abs(s.bookGram - bal.ton) > 0.5) {
+            balTxt += " · دفتر سواپ " + fmt(s.bookGram, 4) + " GRAM";
+          }
+        }
+        meta.textContent = remote.length + " سواپ · +" + added + " · ↻" + updated + balTxt;
+        toast(added ? (added + " سواپ جدید اضافه شد") : (updated ? "سواپ‌ها به‌روز شدند" : "همه سواپ‌ها قبلاً ثبت شده‌اند"));
+      } catch (err) {
+        console.error(err);
+        const msg = (err && err.message) ? String(err.message) : "خطای ناشناخته";
+        let human = "خطا در خواندن کیف‌پول";
+        if (/HTTP 429/.test(msg)) human = "محدودیت tonapi — ۳۰ ثانیه بعد دوباره بزن";
+        else if (/HTTP 400/.test(msg)) human = "آدرس کیف‌پول نامعتبر است";
+        else if (/HTTP 404/.test(msg)) human = "این آدرس در شبکه پیدا نشد";
+        else if (/abort|AbortError|timeout/i.test(msg)) human = "زمان تمام شد — دوباره تلاش کن";
+        else if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) human = "دسترسی شبکه/CORS — صفحه را با GitHub Pages یا یک سرور محلی باز کن (نه file://)";
+        meta.textContent = "خطا: " + human;
+        toast(human + " (" + msg.slice(0, 80) + ")");
+      } finally {
+        syncing = false;
+      }
+    }
+    // starting capital removed — balances & PnL come from wallet + trades only
+    function loadTg() {
+      const d = { token: "", chatId: "", enabled: false, alertAbove: "", alertBelow: "", alertTargetPcts: [0.5, 1, 1.5, 2, 2.5, 3], alertLossPcts: [0.5, 1, 1.5, 2], priceReport30m: false };
+      try {
+        const raw = JSON.parse(localStorage.getItem(TGKEY) || "{}");
+        const merged = { ...d, ...raw };
+        // migrate old single alertTargetPct
+        if (raw.alertTargetPct != null && (raw.alertTargetPcts == null || !Array.isArray(raw.alertTargetPcts))) {
+          const n = Number(raw.alertTargetPct);
+          merged.alertTargetPcts = Number.isFinite(n) && n > 0 ? [n] : [5];
+        }
+        if (!Array.isArray(merged.alertTargetPcts)) merged.alertTargetPcts = [5];
+        if (!Array.isArray(merged.alertLossPcts)) merged.alertLossPcts = [];
+        merged.alertTargetPcts = merged.alertTargetPcts.map(Number).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
+        merged.alertLossPcts = merged.alertLossPcts.map(Number).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
+        return merged;
+      } catch { return d; }
+    }
+    function saveTg() { localStorage.setItem(TGKEY, JSON.stringify(tg)); }
+
+    function takeFromInv(inv, amount) {
+      let rem = amount, cost = 0;
+      while (rem > 1e-12 && inv.length) {
+        const lot = inv[0];
+        const take = Math.min(rem, lot.gram);
+        cost += take * lot.costPer;
+        lot.gram -= take;
+        rem -= take;
+        if (lot.gram < 1e-12) inv.shift();
+      }
+      return { taken: amount - rem, cost: cost };
+    }
+
+    function equityAt(cash, inv, price) {
+      let g = 0; for (const lot of inv) g += lot.gram;
+      return cash + (price ? g * price : 0);
+    }
+
+    /**
+     * Trade ledger + wallet balances.
+     * Balances shown = on-chain when walletBal is set; else inferred from trades.
+     * PnL = realized (closed swaps) + unrealized (open cost vs mark).
+     * No "starting capital".
+     */
+    function calcState(list, price) {
+      const sorted = list.slice().sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+      let totalFeesGram = 0, totalFeesUsdt = 0, realizedPnl = 0;
+      const inv = [];
+      let lastSwapPnl = null, lastSwapPct = null, lastSwapType = null, lastSwapPrice = null;
+      let flowUsdt = 0; // net USDT from swaps only (buy negative, sell positive)
+
+      for (const t of sorted) {
+        const isExact = t.exact === true || t.source === "wallet";
+        const netFeeGram = Math.max(0, t.networkFee || 0);
+        const dexFeeUsdt = Math.max(0, t.dexFeeUsdt || 0);
+        const legacyDexPct = (!isExact && t.dexFeePct != null) ? Math.max(0, t.dexFeePct) / 100 : 0;
+        totalFeesGram += netFeeGram;
+        totalFeesUsdt += dexFeeUsdt;
+        const px = t.price > 0 ? t.price : (t.gram > 0 ? t.usdt / t.gram : null);
+
+        let invBefore = 0;
+        for (const lot of inv) invBefore += lot.gram;
+        const costBefore = inv.reduce((s, lot) => s + lot.gram * lot.costPer, 0);
+
+        if (t.type === "buy") {
+          const payUsdt = t.usdt;
+          const recvGram = isExact ? t.gram : Math.max(0, t.gram * (1 - legacyDexPct) - netFeeGram);
+          flowUsdt -= payUsdt;
+          if (recvGram > 1e-12) inv.push({ gram: recvGram, costPer: payUsdt / recvGram });
+          lastSwapPnl = px != null ? recvGram * px - payUsdt : null;
+        } else {
+          let invGram = 0;
+          for (const lot of inv) invGram += lot.gram;
+          const wantSell = t.gram;
+          const sellGram = Math.min(wantSell, invGram);
+          const fillRatio = wantSell > 1e-12 ? sellGram / wantSell : 0;
+          const recvUsdtFull = isExact ? t.usdt : t.usdt * (1 - legacyDexPct);
+          const recvUsdt = recvUsdtFull * fillRatio;
+          const sellTake = takeFromInv(inv, sellGram);
+          flowUsdt += recvUsdt;
+          const rp = recvUsdt - sellTake.cost;
+          realizedPnl += rp;
+          lastSwapPnl = rp;
+        }
+
+        lastSwapPct = (t.usdt > 0 && lastSwapPnl != null) ? (lastSwapPnl / t.usdt) * 100 : null;
+        lastSwapType = t.type;
+        lastSwapPrice = px;
+      }
+
+      let bookGram = 0, remainingCost = 0;
+      for (const lot of inv) { bookGram += lot.gram; remainingCost += lot.gram * lot.costPer; }
+      const avg = bookGram > 0 ? remainingCost / bookGram : 0;
+
+      // Source of truth: chain balances when available
+      const totalGram = walletBal ? walletBal.ton : bookGram;
+      const cashUsdt = walletBal ? walletBal.usdt : Math.max(0, flowUsdt);
+      const currentValue = price ? totalGram * price : 0;
+      const equity = cashUsdt + currentValue;
+      // Unrealized only on cost-basis inventory (capped by wallet ton)
+      const costForMark = bookGram > 1e-12
+        ? remainingCost * Math.min(1, totalGram / bookGram)
+        : 0;
+      const unrealizedPnl = currentValue - costForMark;
+      const totalPnl = realizedPnl + unrealizedPnl;
+
+      return {
+        totalGram, cashUsdt, bookGram, avgBuyPrice: avg, investedUsdt: costForMark,
+        currentValue, equity, totalPnl,
+        unrealizedPnl, totalFeesGram, totalFeesUsdt, realizedPnl,
+        lastSwapPnl, lastSwapPct, lastSwapType, lastSwapPrice,
+        fromWallet: !!walletBal
+      };
+    }
+
+    /** Last swap from ledger (most recent by date) */
+    function lastTrade() {
+      if (!trades.length) return null;
+      return trades.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id)[0];
+    }
+
+    /**
+     * Suggestion card based on last swap.
+     * buy last → show sell targets (+pct from last price)
+     * sell last → show buy targets (−pct from last price)
+     */
+    function nextAdvice(s, price) {
+      const lt = lastTrade();
+      const pad = 1 - ROUND / 100;
+      if (!lt || !(lt.price > 0)) {
+        return { breakEven: null, suggest: null, hint: "هنوز سواپی ثبت نشده — همگام‌سازی کیف‌پول را بزن", meta: "", rows: [] };
+      }
+      const ref = lt.price;
+      const rows = [];
+
+      if (lt.type === "buy") {
+        // Holding GRAM after buy — when to sell
+        const curPct = price > 0 ? ((price - ref) / ref) * 100 : null;
+        const exec = (price > 0 && s.totalGram > 0) ? estExecSellPrice(price, s.totalGram) : null;
+        const execPct = exec != null ? ((exec - ref) / ref) * 100 : null;
+        let hint = "آخرین سواپ: خرید GRAM @ " + fmt(ref, 4);
+        if (curPct != null) {
+          hint += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? "سود " : "ضرر ") + Math.abs(curPct).toFixed(2) + "٪ نسبت به خرید";
+        }
+        if (execPct != null) {
+          hint += "\nبا لغزش تخمینی: " + fmt(exec, 4) + " (" + (execPct >= 0 ? "+" : "") + execPct.toFixed(2) + "٪)";
+        }
+        const levels = [0.5, 1, 1.5, 2, 3, 5];
+        for (const pct of levels) {
+          const midNeed = ref * (1 + pct / 100) / pad;
+          const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram) / 100 : 0;
+          const midForExec = ref * (1 + pct / 100) / Math.max(0.5, 1 - slip);
+          rows.push({
+            label: "فروش +" + pct + "٪",
+            price: midForExec,
+            detail: "هدف mid ≈ " + fmt(midForExec, 4) + " تا بعد از لغزش حدود +" + pct + "٪ بماند"
+          });
+        }
+        const suggest = (execPct != null && execPct >= MIN_ACTION_PCT) ? "to_usdt" : null;
+        if (suggest) hint += "\n✅ بعد از لغزش در سود معنادار هستی — می‌توانی بفروشی";
+        else if (curPct != null && curPct < 0) hint += "\nمنتظر برگشت بالای " + fmt(ref, 4) + " بمان";
+        return { breakEven: ref / pad, beExact: ref, suggest, hint, meta: "مرجع = قیمت سواپ آخر (خرید)", rows, lastType: "buy", ref };
+      }
+
+      // last was sell — holding USDT, when to buy back
+      const curPct = price > 0 ? ((ref - price) / ref) * 100 : null; // positive = cheaper than sell
+      const execBuy = (price > 0 && s.cashUsdt > 0) ? estExecBuyPrice(price, s.cashUsdt) : null;
+      let hint = "آخرین سواپ: فروش GRAM @ " + fmt(ref, 4);
+      if (curPct != null) {
+        hint += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? (curPct.toFixed(2) + "٪ ارزان‌تر از فروش") : (Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش"));
+      }
+      const levels = [0.5, 1, 1.5, 2, 3, 5];
+      for (const pct of levels) {
+        const target = ref * (1 - pct / 100) * pad;
+        rows.push({
+          label: "خرید −" + pct + "٪",
+          price: target,
+          detail: "زیر " + fmt(target, 4) + " نسبت به فروش آخر حدود +" + pct + "٪ جا برای سود دور بعد"
+        });
+      }
+      const suggest = (curPct != null && curPct >= MIN_ACTION_PCT) ? "to_gram" : null;
+      if (suggest) hint += "\n✅ نسبت به فروش آخر ارزان‌تر شده — می‌توانی دوباره بخری";
+      else hint += "\nمنتظر ریزش زیر اهداف خرید بمان";
+      return { breakEven: ref * pad, beExact: ref, suggest, hint, meta: "مرجع = قیمت سواپ آخر (فروش)", rows, lastType: "sell", ref };
+    }
+
+    async function fetchJson(url, ms) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ms || 4000);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal, headers: { accept: "application/json" } });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return await res.json();
+      } finally { clearTimeout(timer); }
+    }
+
+    async function fromKraken() {
+      const j = await fetchJson("https://api.kraken.com/0/public/Ticker?pair=TONUSD", 4000);
+      const row = j.result && j.result.TONUSD;
+      const last = Number(row && row.c && row.c[0]);
+      const open = Number(row && row.o);
+      if (!last) throw new Error("kraken");
+      return { usd: last, change24h: open ? ((last - open) / open) * 100 : null, source: "Kraken" };
+    }
+    async function fromCoinbase() {
+      const spot = await fetchJson("https://api.coinbase.com/v2/prices/TON-USD/spot");
+      const usd = Number(spot.data && spot.data.amount);
+      if (!usd) throw new Error("coinbase");
+      let change = null;
+      try {
+        const st = await fetchJson("https://api.exchange.coinbase.com/products/TON-USD/stats");
+        const open = Number(st.open), last = Number(st.last);
+        if (open && last) change = ((last - open) / open) * 100;
+      } catch (_) {}
+      return { usd, change24h: change, source: "Coinbase" };
+    }
+    async function fromSton() {
+      const j = await fetchJson("https://api.ston.fi/v1/pools/" + STON, 4000);
+      const pool = j.pool || j;
+      const r0 = Number(pool.reserve0), r1 = Number(pool.reserve1);
+      if (!r0 || !r1) throw new Error("ston");
+      // token0 USDT (6dec), token1 native TON (9dec)
+      if (r1 > 0) poolTonReserve = r1 / 1e9;
+      const usd = (r0 / 1e6) / (r1 / 1e9);
+      if (!Number.isFinite(usd) || usd <= 0) throw new Error("ston bad price");
+      return { usd, change24h: null, source: "STON.fi DEX", dex: true };
+    }
+    async function fromTonapi() {
+      // Same host as wallet sync — usually works when STON/Kraken are blocked
+      const j = await fetchJson("https://tonapi.io/v2/rates?tokens=ton&currencies=usd", 4000);
+      const row = j.rates && j.rates.TON;
+      const usd = row && row.prices && Number(row.prices.USD);
+      if (!Number.isFinite(usd) || usd <= 0) throw new Error("tonapi rates");
+      let change = null;
+      const d = row.diff_24h && row.diff_24h.USD;
+      if (d != null) {
+        const n = parseFloat(String(d).replace(/[%＋+]/g, "").replace("−", "-").replace("–", "-"));
+        if (Number.isFinite(n)) change = n;
+      }
+      return { usd, change24h: change, source: "tonapi" };
+    }
+    async function fromLlama() {
+      const j = await fetchJson("https://coins.llama.fi/prices/current/coingecko:the-open-network");
+      const usd = j.coins && j.coins["coingecko:the-open-network"] && j.coins["coingecko:the-open-network"].price;
+      if (!usd) throw new Error("llama");
+      return { usd, change24h: null, source: "DefiLlama" };
+    }
+    async function fromGecko() {
+      const j = await fetchJson("https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd&include_24hr_change=true");
+      const row = j["the-open-network"];
+      if (!row || !row.usd) throw new Error("gecko");
+      return { usd: row.usd, change24h: row.usd_24h_change ?? null, source: "CoinGecko" };
+    }
+
+
+    function paintPrice() {
+      const el = document.getElementById("livePrice");
+      const meta = document.getElementById("priceMeta");
+      const pill = document.getElementById("chgPill");
+      if (el) el.textContent = (live != null && Number.isFinite(Number(live))) ? fmt(live, 4) : "—";
+      if (quote && meta) {
+        let m = (quote.source || "بازار") + (quote.cached ? " · کش" : "") + (quote.stale ? " · قدیمی" : "");
+        if (quote.dexUsd != null && quote.cexUsd != null) {
+          const sp = quote.dexUsd - quote.cexUsd;
+          m += " · CEX " + fmt(quote.cexUsd, 4) + " · اختلاف " + (sp >= 0 ? "+" : "") + fmt(sp, 4);
+        }
+        meta.textContent = m;
+      } else if (meta && live == null) {
+        meta.textContent = "در حال دریافت قیمت…";
+      }
+      if (pill) {
+        if (quote && quote.change24h != null) {
+          const ch = quote.change24h;
+          pill.className = "pill " + (ch >= 0 ? "up" : "down");
+          pill.textContent = (ch >= 0 ? "▲ " : "▼ ") + Math.abs(ch).toFixed(2) + "٪";
+          pill.classList.remove("hidden");
+        }
+      }
+    }
+
+    function applyQuote(q, opts) {
+      opts = opts || {};
+      quote = Object.assign({}, q, {
+        cached: !!opts.cached,
+        stale: !!opts.stale
+      });
+      live = Number(quote.usd);
+      if (!Number.isFinite(live)) live = null;
+      if (quote.dexUsd != null) dexPrice = quote.dexUsd;
+      if (quote.cexUsd != null) cexPrice = quote.cexUsd;
+      try { if (live != null) pushPriceSample(live); } catch (_) {}
+      try {
+        if (live != null) {
+          localStorage.setItem(PKEY, JSON.stringify({ at: Date.now(), q: {
+            usd: quote.usd,
+            change24h: quote.change24h,
+            source: quote.source,
+            dexUsd: quote.dexUsd,
+            cexUsd: quote.cexUsd
+          }}));
+        }
+      } catch (_) {}
+      // Critical: paint immediately so user never depends on full render / button
+      try { paintPrice(); } catch (_) {}
+    }
+
+    async function getPrice(force) {
+      const now = Date.now();
+      // Serve cache instantly (even on force we show it first, then refresh)
+      try {
+        const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
+        if (cached && cached.q && cached.q.usd && now - cached.at < 120000) {
+          applyQuote(cached.q, { cached: true, stale: now - cached.at > 45000 });
+          if (!force && now - cached.at < 15000) return quote; // fresh enough
+        }
+      } catch (_) {}
+
+      // Race the two fastest sources — first valid wins UI
+      const sources = [
+        fromSton,
+        fromTonapi,
+        fromKraken,
+        fromCoinbase
+      ];
+
+      let primary = null;
+      let errors = [];
+      // parallel race: first success
+      primary = await new Promise((resolve) => {
+        let done = false;
+        let pending = sources.length;
+        sources.forEach((fn) => {
+          fn().then((r) => {
+            if (!done && r && r.usd > 0) {
+              done = true;
+              resolve(r);
+            }
+          }).catch((e) => {
+            errors.push(String(e && e.message || e));
+          }).finally(() => {
+            pending -= 1;
+            if (!done && pending === 0) resolve(null);
+          });
+        });
+      });
+
+      if (!primary) {
+        if (live != null && Number.isFinite(live)) {
+          // keep existing
+          return quote;
+        }
+        throw new Error("no price: " + errors.slice(0, 2).join("; "));
+      }
+
+      const isDex = !!primary.dex || (primary.source && String(primary.source).indexOf("STON") >= 0);
+      applyQuote({
+        usd: primary.usd,
+        change24h: primary.change24h != null ? primary.change24h : (quote && quote.change24h),
+        source: primary.source,
+        dexUsd: isDex ? primary.usd : null,
+        cexUsd: !isDex ? primary.usd : (quote && quote.cexUsd)
+      });
+
+      // Background: enrich with the other type (DEX/CEX) without blocking UI
+      (async () => {
+        try {
+          if (isDex) {
+            let ref = null;
+            try { ref = await fromTonapi(); } catch (_) {
+              try { ref = await fromKraken(); } catch (_) {}
+            }
+            if (ref && ref.usd) {
+              quote.cexUsd = ref.usd;
+              cexPrice = ref.usd;
+              if (ref.change24h != null) quote.change24h = ref.change24h;
+              try { localStorage.setItem(PKEY, JSON.stringify({ at: Date.now(), q: quote })); } catch (_) {}
+              try { render(); } catch (_) {}
+            }
+          } else {
+            try {
+              const dex = await fromSton();
+              if (dex && dex.usd) {
+                // Prefer DEX mid for trading once available
+                applyQuote({
+                  usd: dex.usd,
+                  change24h: quote.change24h,
+                  source: dex.source,
+                  dexUsd: dex.usd,
+                  cexUsd: primary.usd
+                });
+                try { render(); } catch (_) {}
+              }
+            } catch (_) {}
+          }
+        } catch (_) {}
+      })();
+
+      return quote;
+    }
+
+    async function getChart(days) {
+      const interval = days <= 1 ? 15 : days <= 7 ? 60 : 240;
+      try {
+        const j = await fetchJson("https://api.kraken.com/0/public/OHLC?pair=TONUSD&interval=" + interval, 10000);
+        const rows = j.result && j.result.TONUSD;
+        if (!Array.isArray(rows) || !rows.length) throw new Error("empty");
+        const cutoff = Date.now() - days * 86400000;
+        return rows.map((r) => ({ t: r[0] * 1000, p: Number(r[4]) })).filter((p) => p.t >= cutoff && Number.isFinite(p.p));
+      } catch (_) {
+        const j = await fetchJson("https://coins.llama.fi/chart/coingecko:the-open-network?span=" + days + "&period=1d", 10000);
+        const prices = j.coins && j.coins["coingecko:the-open-network"] && j.coins["coingecko:the-open-network"].prices;
+        if (!prices || !prices.length) throw new Error("chart");
+        return prices.map((p) => ({ t: p.timestamp * 1000, p: p.price }));
+      }
+    }
+
+    function drawChart(pts, avg) {
+      const c = document.getElementById("chart");
+      const ctx = c.getContext("2d");
+      const r = window.devicePixelRatio || 1;
+      const w = c.clientWidth, h = c.clientHeight;
+      c.width = w * r; c.height = h * r; ctx.scale(r, r);
+      ctx.clearRect(0, 0, w, h);
+      if (!pts.length) {
+        ctx.fillStyle = "#6b7a8d"; ctx.font = "13px Vazirmatn"; ctx.textAlign = "center";
+        ctx.fillText("نمودار در دسترس نیست", w / 2, h / 2); return;
+      }
+      const pad = { t: 12, r: 12, b: 22, l: 48 };
+      const min = Math.min(...pts.map((p) => p.p), avg || Infinity);
+      const max = Math.max(...pts.map((p) => p.p), avg || -Infinity);
+      const span = max - min || 0.01;
+      const x = (i) => pad.l + (i / (pts.length - 1)) * (w - pad.l - pad.r);
+      const y = (p) => pad.t + (1 - (p - min) / span) * (h - pad.t - pad.b);
+      ctx.strokeStyle = "#243041"; ctx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const yy = pad.t + ((h - pad.t - pad.b) * i) / 3;
+        ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(w - pad.r, yy); ctx.stroke();
+        ctx.fillStyle = "#6b7a8d"; ctx.font = "11px Vazirmatn"; ctx.textAlign = "left";
+        ctx.fillText((max - (span * i) / 3).toFixed(3), 4, yy + 4);
+      }
+      if (avg) {
+        ctx.setLineDash([5, 5]); ctx.strokeStyle = "#6b7a8d";
+        ctx.beginPath(); ctx.moveTo(pad.l, y(avg)); ctx.lineTo(w - pad.r, y(avg)); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.beginPath();
+      pts.forEach((p, i) => { i ? ctx.lineTo(x(i), y(p.p)) : ctx.moveTo(x(i), y(p.p)); });
+      ctx.strokeStyle = "#14b8a6"; ctx.lineWidth = 2; ctx.stroke();
+      const g = ctx.createLinearGradient(0, pad.t, 0, h - pad.b);
+      g.addColorStop(0, "rgba(20,184,166,.22)"); g.addColorStop(1, "rgba(20,184,166,0)");
+      ctx.lineTo(x(pts.length - 1), h - pad.b); ctx.lineTo(x(0), h - pad.b); ctx.closePath();
+      ctx.fillStyle = g; ctx.fill();
+    }
+
+    function sendTelegram(text) {
+      const token = tg.token.trim(), chat = tg.chatId.trim();
+      if (!token || !chat) return Promise.reject(new Error("توکن و Chat ID لازم است"));
+      const url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(text);
+      return fetch(url).then((r) => r.json()).then((j) => {
+        if (!j.ok) throw new Error(j.description || "ارسال ناموفق");
+        return j;
+      }).catch(() => new Promise((resolve) => {
+        const img = new Image();
+        img.onload = img.onerror = () => resolve(true);
+        img.src = url;
+        setTimeout(() => resolve(true), 1500);
+      }));
+    }
+
+    /** Record price samples for momentum (keep ~2h at 45s interval) */
+    function pushPriceSample(price) {
+      if (price == null || !Number.isFinite(price)) return [];
+      let series = [];
+      try { series = JSON.parse(localStorage.getItem(SERIESKEY) || "[]"); } catch (_) {}
+      if (!Array.isArray(series)) series = [];
+      const now = Date.now();
+      series.push({ t: now, p: price });
+      // drop older than 3 hours, keep max 200 points
+      const cutoff = now - 3 * 60 * 60 * 1000;
+      series = series.filter((x) => x.t >= cutoff).slice(-200);
+      try { localStorage.setItem(SERIESKEY, JSON.stringify(series)); } catch (_) {}
+      return series;
+    }
+
+    /**
+     * Multi-window momentum. Noise = max(floor, pct * price).
+     * Short ≈ 15m, medium ≈ 45m (at 45s samples).
+     */
+    function detectMomentum(series) {
+      if (!series || series.length < 4) return { dir: "flat", delta: 0, from: null, to: null, bars: 0, medDir: "flat", medDelta: 0 };
+      const shortN = Math.min(series.length, 20);  // ~15 min
+      const medN = Math.min(series.length, 60);    // ~45 min
+      const short = series.slice(-shortN);
+      const med = series.slice(-medN);
+      const nAbs = noiseAbs(short[short.length - 1].p);
+      function win(arr) {
+        const from = arr[0].p, to = arr[arr.length - 1].p, delta = to - from;
+        let up = 0, down = 0;
+        for (let i = 1; i < arr.length; i++) {
+          const d = arr[i].p - arr[i - 1].p;
+          if (d >= nAbs) up++;
+          else if (d <= -nAbs) down++;
+        }
+        let dir = "flat";
+        if (Math.abs(delta) >= nAbs) {
+          if (delta > 0 && up >= down) dir = "up";
+          else if (delta < 0 && down >= up) dir = "down";
+        }
+        return { dir, delta, from, to, bars: dir === "up" ? up : dir === "down" ? down : 0 };
+      }
+      const s = win(short), m = win(med);
+      // Prefer aligned direction; if conflict → flat (avoid whipsaw)
+      let dir = s.dir;
+      if (s.dir !== "flat" && m.dir !== "flat" && s.dir !== m.dir) dir = "flat";
+      else if (s.dir === "flat" && m.dir !== "flat") dir = m.dir;
+      return { dir, delta: s.delta, from: s.from, to: s.to, bars: s.bars, medDir: m.dir, medDelta: m.delta, noise: nAbs };
+    }
+
+    /** Position stance from last swap / balances */
+    function positionStance(s) {
+      const hasGram = s.totalGram > 1e-6;
+      const hasUsdt = s.cashUsdt > 1e-6;
+      if (hasGram && !hasUsdt) {
+        return {
+          mode: "hold_gram",
+          label: "GRAM داری",
+          action: "sell"
+        };
+      }
+      if (hasUsdt && !hasGram) {
+        return {
+          mode: "hold_usdt",
+          label: "USDT داری",
+          action: "buy"
+        };
+      }
+      if (hasGram && hasUsdt) {
+        // mixed: prefer the larger side by equity share
+        const gVal = s.totalGram * (live || s.avgBuyPrice || 0);
+        if (gVal >= s.cashUsdt) {
+          return { mode: "hold_gram", label: "بیشتر GRAM داری", action: "sell" };
+        }
+        return { mode: "hold_usdt", label: "بیشتر USDT داری", action: "buy" };
+      }
+      return { mode: "empty", label: "پوزیشن خالی", action: null };
+    }
+
+    /** True if a sell at live would be meaningfully above break-even (not just noise) */
+    function sellIsWorthwhile(s, price) {
+      if (!s.avgBuyPrice || s.totalGram <= 0 || !price) return false;
+      // Use estimated execution price after slippage on full position
+      const exec = estExecSellPrice(price, s.totalGram);
+      const pct = ((exec - s.avgBuyPrice) / s.avgBuyPrice) * 100;
+      return pct >= MIN_ACTION_PCT && (exec - s.avgBuyPrice) >= noiseAbs(price) * 0.5;
+    }
+
+    /** True if buy at live is meaningfully below last sell / reference */
+    function buyIsWorthwhile(s, price) {
+      if (!price) return false;
+      const ref = (s.lastSwapType === "sell" && s.lastSwapPrice) ? s.lastSwapPrice : null;
+      const exec = s.cashUsdt > 0 ? estExecBuyPrice(price, s.cashUsdt) : price;
+      if (ref != null) {
+        const pct = ((ref - exec) / ref) * 100;
+        return pct >= MIN_ACTION_PCT && (ref - exec) >= noiseAbs(price) * 0.5;
+      }
+      return true;
+    }
+
+    /** Priority-1 headline: profit / loss first */
+    function pnlHeadline(s, price) {
+      if (!price) return { emoji: "⚪", title: "قیمت در دسترس نیست", pct: null, kind: "unknown" };
+      // Holding GRAM → unrealized vs avg entry (or last buy)
+      if (s.totalGram > 1e-6 && s.avgBuyPrice > 0) {
+        const pct = ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100;
+        if (pct >= 0.15) return { emoji: "🟢", title: "در سود شناور", pct: pct, kind: "profit", basis: "میانگین ورود " + fmt(s.avgBuyPrice, 4) };
+        if (pct <= -0.15) return { emoji: "🔴", title: "در ضرر شناور", pct: pct, kind: "loss", basis: "میانگین ورود " + fmt(s.avgBuyPrice, 4) };
+        return { emoji: "⚪", title: "نزدیک سر به سر", pct: pct, kind: "flat", basis: "میانگین ورود " + fmt(s.avgBuyPrice, 4) };
+      }
+      // Holding mostly USDT after a sell → vs last sell price
+      const lt = lastTrade();
+      if (lt && lt.type === "sell" && lt.price > 0) {
+        const pct = ((price - lt.price) / lt.price) * 100; // + = price rose after sell
+        if (pct <= -0.15) return { emoji: "🟢", title: "فرصت خرید بهتر از فروش", pct: pct, kind: "opportunity", basis: "آخرین فروش " + fmt(lt.price, 4) };
+        if (pct >= 0.15) return { emoji: "🟡", title: "قیمت بالاتر از فروش تو", pct: pct, kind: "missed", basis: "آخرین فروش " + fmt(lt.price, 4) };
+        return { emoji: "⚪", title: "نزدیک قیمت فروش", pct: pct, kind: "flat", basis: "آخرین فروش " + fmt(lt.price, 4) };
+      }
+      if (lt && lt.type === "buy" && lt.price > 0) {
+        const pct = ((price - lt.price) / lt.price) * 100;
+        if (pct >= 0.15) return { emoji: "🟢", title: "بالاتر از آخرین خرید", pct: pct, kind: "profit", basis: "آخرین خرید " + fmt(lt.price, 4) };
+        if (pct <= -0.15) return { emoji: "🔴", title: "پایین‌تر از آخرین خرید", pct: pct, kind: "loss", basis: "آخرین خرید " + fmt(lt.price, 4) };
+        return { emoji: "⚪", title: "نزدیک آخرین خرید", pct: pct, kind: "flat", basis: "آخرین خرید " + fmt(lt.price, 4) };
+      }
+      return { emoji: "⚪", title: "مرجع کافی نیست", pct: null, kind: "unknown" };
+    }
+
+    function formatPctSigned(pct) {
+      if (pct == null || !Number.isFinite(pct)) return "—";
+      const a = Math.abs(pct).toFixed(2);
+      return (pct >= 0 ? "+" : "−") + a + "٪";
+    }
+
+    function actionAdvice(s, price, hl) {
+      if (!price) return "صبر کن تا قیمت معتبر شود.";
+      if (hl.kind === "profit" && s.totalGram > 1e-6) {
+        if (sellIsWorthwhile(s, price)) return "می‌توانی فروش را در نظر بگیری (لغزش را حساب کن).";
+        return "در سودی؛ برای فروش بهتر صبر کن تا به اهداف برسد.";
+      }
+      if (hl.kind === "loss" && s.totalGram > 1e-6) {
+        return "ضرر هنوز قطعی نیست مگر بفروشی. عجله نکن.";
+      }
+      if (hl.kind === "opportunity") {
+        if (buyIsWorthwhile(s, price)) return "نسبت به فروش قبلی جا برای خرید بهتر داری.";
+        return "کمی ارزان‌تر شده؛ هنوز برای ورود عجله نکن.";
+      }
+      if (hl.kind === "missed") {
+        return "قیمت از فروش تو بالا رفته. برای خرید دوباره صبر کن.";
+      }
+      return "شرایط خنثی است. صبر منطقی‌تر از معامله عجولانه است.";
+    }
+
+    function targetsBlock(s, price) {
+      const lt = lastTrade();
+      if (!lt || !(lt.price > 0)) return "";
+      const ref = lt.price;
+      const pad = 1 - ROUND / 100;
+      // Fewer levels = clearer priority
+      const levels = [
+        { pct: 1, tag: "۱٪" },
+        { pct: 2, tag: "۲٪" },
+        { pct: 3, tag: "۳٪" },
+        { pct: 5, tag: "۵٪" }
+      ];
+      let out = "";
+      if (lt.type === "buy") {
+        out += "\n\nاهداف فروش:";
+        for (const L of levels) {
+          const slip = (s && s.totalGram > 0) ? estSlippagePct(s.totalGram) / 100 : 0;
+          const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+          out += "\n• +" + L.tag + " → " + fmt(midNeed, 4);
+        }
+      } else {
+        out += "\n\nاهداف خرید:";
+        for (const L of levels) {
+          const target = ref * (1 - L.pct / 100) * pad;
+          out += "\n• −" + L.tag + " → " + fmt(target, 4);
+        }
+      }
+      return out;
+    }
+
+    /** Compact context for alerts (no long target lists) */
+    function stanceLine(stance, s, price) {
+      const hl = pnlHeadline(s, price);
+      let line = hl.emoji + " " + hl.title;
+      if (hl.pct != null) line += "  " + formatPctSigned(hl.pct);
+      if (hl.basis) line += "\n" + hl.basis;
+      line += "\n" + actionAdvice(s, price, hl);
+      return line;
+    }
+
+    /** Full professional status report for 30-min / manual status */
+    function buildStatusMessage(s) {
+      const price = live;
+      const hl = pnlHeadline(s, price);
+      let msg = "📊 GRAM · وضعیت\n\n";
+
+      // 1) P&L first
+      msg += hl.emoji + " " + hl.title;
+      if (hl.pct != null) msg += "  " + formatPctSigned(hl.pct);
+      msg += "\n";
+      if (hl.basis) msg += hl.basis + "\n";
+
+      // 2) Snapshot
+      msg += "\nقیمت: " + (price != null ? fmt(price, 4) : "—");
+      if (quote && quote.source) msg += " · " + quote.source;
+      const bits = [];
+      if (s.cashUsdt > 0) bits.push(fmt(s.cashUsdt, 2) + " USDT");
+      if (s.totalGram > 1e-6) bits.push(fmt(s.totalGram, 4) + " GRAM");
+      if (bits.length) msg += "\nپوزیشن: " + bits.join(" · ");
+      if (s.equity) msg += "\nارزش ≈ " + fmt(s.equity, 2) + " USDT";
+
+      // 3) Clear advice
+      msg += "\n\nپیشنهاد: " + actionAdvice(s, price, hl);
+
+      // 4) Targets only when relevant
+      if (hl.kind === "profit" || hl.kind === "loss" || hl.kind === "opportunity" || hl.kind === "missed" || hl.kind === "flat") {
+        msg += targetsBlock(s, price);
+      }
+
+      return msg;
+    }
+
+    function maybeAlert(state) {
+      if (!tg.enabled || !live || !tg.token || !tg.chatId) return;
+      const series = pushPriceSample(live);
+      const mom = detectMomentum(series);
+      const stance = positionStance(state);
+      const above = Number(tg.alertAbove), below = Number(tg.alertBelow);
+      const profitPcts = Array.isArray(tg.alertTargetPcts) ? tg.alertTargetPcts : [];
+      const lossPcts = Array.isArray(tg.alertLossPcts) ? tg.alertLossPcts : [];
+      let mem = null;
+      try { mem = JSON.parse(localStorage.getItem(MEMKEY) || "null"); } catch (_) {}
+      if (!mem || typeof mem !== "object") mem = {};
+      const now = Date.now(), cool = 20 * 60 * 1000, coolMom = 12 * 60 * 1000;
+      const recently = (k, c) => mem[k] && now - mem[k] < (c || cool);
+      const mark = (k) => { mem[k] = now; localStorage.setItem(MEMKEY, JSON.stringify(mem)); };
+      let sent = false;
+
+      // --- fixed price thresholds (with stance context) ---
+      if (above > 0 && live >= above && !recently("above")) {
+        mark("above");
+        let msg = "🔺 سقف قیمت\n\nسقف: " + fmt(above, 4) + " · الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live);
+        sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+        sent = true;
+      } else if (below > 0 && live <= below && !recently("below")) {
+        mark("below");
+        let msg = "🔻 کف قیمت\n\nکف: " + fmt(below, 4) + " · الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live);
+        sendTelegram(msg).then(() => toast("هشدار تلگرام ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+        sent = true;
+      }
+
+      // --- profit / loss vs LAST SWAP price (real relative move) ---
+      const lt = lastTrade();
+      if (lt && lt.price > 0) {
+        const ref = lt.price;
+        const movePct = ((live - ref) / ref) * 100; // + = price up since last swap
+        if (lt.type === "buy") {
+          // bought: profit when price up, loss when price down
+          for (const targetPct of profitPcts) {
+            const key = "ls_profit_buy_" + targetPct;
+            if (movePct >= targetPct && !recently(key)) {
+              mark(key);
+              sendTelegram("🟢 سود نسبت به خرید\n\n+" + movePct.toFixed(2) + "٪ · هدف +" + targetPct + "٪\nخرید: " + fmt(ref, 4) + " · الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live))
+                .then(() => toast("هشدار سود ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
+          }
+          for (const lossPct of lossPcts) {
+            const key = "ls_loss_buy_" + lossPct;
+            if (movePct <= -lossPct && !recently(key)) {
+              mark(key);
+              sendTelegram("🔴 عقب‌نشینی نسبت به خرید\n\n" + movePct.toFixed(2) + "٪ · آستانه −" + lossPct + "٪\nخرید: " + fmt(ref, 4) + " · الان: " + fmt(live, 4) + "\nضرر قطعی نیست مگر بفروشی.\n\n" + stanceLine(stance, state, live))
+                .then(() => toast("هشدار ضرر ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
+          }
+        } else if (lt.type === "sell") {
+          // sold: "profit" = price dropped (buy cheaper), "loss" = price rose (missed)
+          for (const targetPct of profitPcts) {
+            const key = "ls_profit_sell_" + targetPct;
+            if (movePct <= -targetPct && !recently(key)) {
+              mark(key);
+              sendTelegram("🟢 فرصت خرید\n\n" + movePct.toFixed(2) + "٪ نسبت به فروش · هدف −" + targetPct + "٪\nفروش: " + fmt(ref, 4) + " · الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live))
+                .then(() => toast("هشدار فرصت خرید")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
+          }
+          for (const lossPct of lossPcts) {
+            const key = "ls_loss_sell_" + lossPct;
+            if (movePct >= lossPct && !recently(key)) {
+              mark(key);
+              sendTelegram("🟡 قیمت بالاتر از فروش تو\n\n+" + movePct.toFixed(2) + "٪ · آستانه +" + lossPct + "٪\nفروش: " + fmt(ref, 4) + " · الان: " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live))
+                .then(() => toast("هشدار رشد بعد از فروش")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // --- momentum / readiness alerts (noise-filtered) ---
+      // Rising while holding GRAM → get ready to sell (only if sell is worthwhile)
+      if (mom.dir === "up" && stance.action === "sell" && !recently("mom_up_sell", coolMom)) {
+        if (sellIsWorthwhile(state, live)) {
+          mark("mom_up_sell");
+          const msg = "📈 روند صعودی\n\nاز " + fmt(mom.from, 4) + " → " + fmt(live, 4) + " (+" + fmt(Math.abs(mom.delta), 4) + ")\n\n" + stanceLine(stance, state, live);
+          sendTelegram(msg).then(() => toast("هشدار روند صعودی")).catch(() => {});
+          sent = true;
+        }
+      }
+      // Falling while holding GRAM → warn to sell before bigger drop (only if still above BE enough, or cut loss if configured)
+      if (mom.dir === "down" && stance.action === "sell" && !recently("mom_down_sell", coolMom)) {
+        const drop = Math.abs(mom.delta);
+        const nAbs = mom.noise || noiseAbs(live);
+        if (drop >= nAbs) {
+          mark("mom_down_sell");
+          let msg = "📉 روند نزولی\n\nاز " + fmt(mom.from, 4) + " → " + fmt(live, 4) + " (−" + fmt(drop, 4) + ")\n\n" + stanceLine(stance, state, live);
+          sendTelegram(msg).then(() => toast("هشدار روند نزولی")).catch(() => {});
+          sent = true;
+        }
+      }
+      if (mom.dir === "down" && stance.action === "buy" && !recently("mom_down_buy", coolMom)) {
+        const drop = Math.abs(mom.delta);
+        const nAbs = mom.noise || noiseAbs(live);
+        if (drop >= nAbs && buyIsWorthwhile(state, live)) {
+          mark("mom_down_buy");
+          const msg = "📉 افت قیمت\n\nاز " + fmt(mom.from, 4) + " → " + fmt(live, 4) + " (−" + fmt(drop, 4) + ")\n\n" + stanceLine(stance, state, live);
+          sendTelegram(msg).then(() => toast("هشدار فرصت خرید")).catch(() => {});
+          sent = true;
+        }
+      }
+      if (mom.dir === "up" && stance.action === "buy" && !recently("mom_up_buy", coolMom)) {
+        const nAbs = mom.noise || noiseAbs(live);
+        if (buyIsWorthwhile(state, live) || Math.abs(mom.delta) >= nAbs) {
+          const ref = (state.lastSwapType === "sell" && state.lastSwapPrice) ? state.lastSwapPrice : null;
+          const chasing = ref != null && live > ref + nAbs;
+          if (!chasing) {
+            mark("mom_up_buy");
+            const msg = "📈 برگشت قیمت\n\nحرکت +" + fmt(Math.abs(mom.delta), 4) + " · الان " + fmt(live, 4) + "\n\n" + stanceLine(stance, state, live);
+            sendTelegram(msg).then(() => toast("هشدار خرید روی برگشت")).catch(() => {});
+            sent = true;
+          }
+        }
+      }
+
+      return sent;
+    }
+
+    function stat(label, value, sub, tone) {
+      return '<div class="stat-tile">'
+        + '<span class="stat-label">' + label + '</span>'
+        + '<p class="stat-v' + (tone ? ' ' + tone : '') + '">' + value + '</p>'
+        + (sub ? '<span class="stat-sub">' + sub + '</span>' : '')
+        + '</div>';
+    }
+
+    function render() {
+      const hasWallet = !!(walletAddr && walletAddr.trim());
+      const walletHint = document.getElementById("walletHint");
+      if (walletHint) walletHint.classList.toggle("hidden", hasWallet);
+      const walletDot = document.getElementById("walletDot");
+      const btnWallet = document.getElementById("btnWallet");
+      if (walletDot) walletDot.hidden = !hasWallet;
+      if (btnWallet) {
+        btnWallet.classList.toggle("is-connected", hasWallet);
+        btnWallet.title = hasWallet ? "کیف‌پول متصل · تنظیمات" : "اتصال کیف‌پول";
+        btnWallet.setAttribute("aria-label", hasWallet ? "تنظیمات کیف‌پول متصل" : "اتصال کیف‌پول");
+      }
+      const s = calcState(trades, live);
+      const adv = nextAdvice(s, live);
+      const hint = document.getElementById("autoFeeHint");
+      if (hint) {
+        const feeG = s.totalFeesGram || 0;
+        const feeU = s.totalFeesUsdt || 0;
+        hint.textContent = feeG > 0 || feeU > 0
+          ? ("کارمزد دقیق از زنجیره: شبکه " + fmt(feeG, 6) + " GRAM" + (feeU > 0 ? " · DEX " + fmt(feeU, 4) + " USDT" : "") + " · بدون تخمین")
+          : "مبالغ سواپ از زنجیره دقیق‌اند · کارمزد DEX داخل مبلغ خالص لحاظ شده";
+      }
+      const adviceEl = document.getElementById("adviceText");
+      if (adviceEl) adviceEl.innerHTML = (adv.hint || "").replace(/\n/g, "<br>");
+      const adviceMeta = document.getElementById("adviceMeta");
+      if (adviceMeta) {
+        adviceMeta.textContent = adv.meta
+          ? (adv.meta + (adv.ref ? " · " + fmt(adv.ref, 4) : "") + (adv.suggest === "to_usdt" ? " · پیشنهاد: فروش" : adv.suggest === "to_gram" ? " · پیشنهاد: خرید" : ""))
+          : "";
+      }
+      const adviceTargets = document.getElementById("adviceTargets");
+      if (adviceTargets) {
+        if (adv.rows && adv.rows.length) {
+          adviceTargets.innerHTML = adv.rows.map((r) =>
+            '<button class="target" type="button" data-p="' + r.price + '"><span class="' + (adv.lastType === "buy" ? "profit" : "loss") + '" style="font-weight:800">' + r.label + '</span><span><b style="display:block;font-variant-numeric:tabular-nums">' + fmt(r.price, 4) + '</b><span class="muted">' + r.detail + "</span></span></button>"
+          ).join("");
+          adviceTargets.querySelectorAll(".target").forEach((b) => {
+            b.onclick = () => {
+              const p = Number(b.dataset.p);
+              document.getElementById("simPrice").value = p.toFixed(4);
+              if (adv.lastType === "buy") runSim(p);
+              else toast("هدف خرید: " + fmt(p, 4) + " — وقتی mid نزدیک این عدد شد بخر");
+            };
+          });
+        } else {
+          adviceTargets.innerHTML = "";
+        }
+      }
+      document.getElementById("livePrice").textContent = live != null ? fmt(live, 4) : "—";
+      const pill = document.getElementById("chgPill");
+      if (quote && quote.change24h != null) {
+        const ch = quote.change24h;
+        pill.className = "pill " + (ch >= 0 ? "up" : "down");
+        pill.textContent = (ch >= 0 ? "▲ " : "▼ ") + Math.abs(ch).toFixed(2) + "٪";
+        pill.classList.remove("hidden");
+      }
+      if (quote) {
+        let meta = quote.source + (quote.cached ? " · کش ۴۵ث" : "") + (quote.stale ? " · قدیمی" : "");
+        if (quote.dexUsd != null && quote.cexUsd != null) {
+          const sp = quote.dexUsd - quote.cexUsd;
+          meta += " · CEX " + fmt(quote.cexUsd, 4) + " · اختلاف " + (sp >= 0 ? "+" : "") + fmt(sp, 4);
+        }
+        if (s.totalGram > 0 && live) {
+          meta += " · تخمین اجرا فروش: " + fmt(estExecSellPrice(live, s.totalGram), 4) + " (لغزش ~" + estSlippagePct(s.totalGram).toFixed(2) + "٪)";
+        }
+        document.getElementById("priceMeta").textContent = meta;
+      } else {
+        document.getElementById("priceMeta").textContent = "در حال اتصال به بازار…";
+      }
+      const balLine = document.getElementById("walletBalLine");
+      if (balLine) {
+        if (walletBal) {
+          let txt = "✓ موجودی کیف‌پول: " + fmt(walletBal.ton, 4) + " GRAM · " + fmt(walletBal.usdt, 2) + " USDT";
+          if (s.bookGram != null) {
+            const d = Math.abs(s.bookGram - walletBal.ton);
+            if (d > 0.5) {
+              txt += " · ⚠️ دفتر سواپ‌ها " + fmt(s.bookGram, 4) + " GRAM (اختلاف " + fmt(d, 4) + " — واریز/برداشت غیرسواپ یا تاریخچه ناقص)";
+            } else {
+              txt += " · دفتر سواپ با زنجیره هم‌خوان";
+            }
+          }
+          balLine.textContent = txt;
+        } else {
+          balLine.textContent = "همگام‌سازی کن تا موجودی دقیق از کیف‌پول خوانده شود";
+        }
+      }
+
+      const base = s.investedUsdt > 0 ? s.investedUsdt : (Math.abs(s.realizedPnl) + s.investedUsdt);
+      const pnlPct = s.investedUsdt > 0 ? (s.unrealizedPnl / s.investedUsdt) * 100
+        : (s.realizedPnl != null && Math.abs(s.realizedPnl) > 0 ? null : null);
+      const totalPct = (s.realizedPnl + s.unrealizedPnl);
+      document.getElementById("stats1").innerHTML =
+        stat("موجودی GRAM", fmt(s.totalGram, 4), s.fromWallet ? "از کیف‌پول" : "از سواپ‌ها") +
+        stat("موجودی USDT", fmt(s.cashUsdt, 2), s.fromWallet ? "از کیف‌پول" : "برآورد سواپ‌ها") +
+        stat("ارزش کل", live != null ? fmt(s.equity, 2) : "—", "USDT") +
+        stat("سود/زیان کل", (s.totalPnl >= 0 ? "+" : "") + fmt(s.totalPnl, 2),
+          s.investedUsdt > 0 ? (("شناور " + (s.unrealizedPnl >= 0 ? "+" : "") + ((s.unrealizedPnl / s.investedUsdt) * 100).toFixed(2) + "٪") + " · محقق " + (s.realizedPnl >= 0 ? "+" : "") + fmt(s.realizedPnl, 2)) : ("محقق " + (s.realizedPnl >= 0 ? "+" : "") + fmt(s.realizedPnl, 2)),
+          s.totalPnl >= 0 ? "profit" : "loss");
+      document.getElementById("stats2").innerHTML =
+        stat("سود/زیان سواپ آخر", s.lastSwapPnl != null ? ((s.lastSwapPnl >= 0 ? "+" : "") + fmt(s.lastSwapPnl, 2)) : "—", s.lastSwapPct != null ? ((s.lastSwapPct >= 0 ? "+" : "") + s.lastSwapPct.toFixed(2) + "٪") : "", s.lastSwapPnl != null ? (s.lastSwapPnl >= 0 ? "profit" : "loss") : "") +
+        stat("میانگین ورود", s.avgBuyPrice ? fmt(s.avgBuyPrice, 4) : "—", "USDT / GRAM") +
+        stat("هزینه پوزیشن باز", s.investedUsdt ? fmt(s.investedUsdt, 2) : "—", "USDT");
+
+      const box = document.getElementById("targets");
+      if (box) {
+      if (s.totalGram <= 0 || !s.avgBuyPrice) box.innerHTML = '<p class="empty">بعد از سواپ به GRAM، اهداف اینجا می‌آید</p>';
+      else {
+        const slip = estSlippagePct(s.totalGram) / 100;
+        box.innerHTML = [1, 2, 3, 5, 7, 10, 15, 20].map((pct) => {
+          // mid needed so that AFTER slippage, profit ≈ pct%
+          const neededMid = (s.avgBuyPrice * (1 + pct / 100)) / Math.max(0.5, 1 - slip) / (1 - ROUND / 100);
+          const exec = estExecSellPrice(neededMid, s.totalGram);
+          const usdtOut = s.totalGram * exec;
+          const net = usdtOut - s.investedUsdt;
+          return '<button class="target" type="button" data-p="' + neededMid + '"><span class="profit" style="font-weight:800">+' + pct + '٪</span><span><b style="display:block;font-variant-numeric:tabular-nums">' + fmt(neededMid, 4) + ' mid</b><span class="muted">≈ ' + fmt(usdtOut, 2) + ' بعد از لغزش</span></span><span class="profit" style="font-weight:800">+' + fmt(net, 2) + "</span></button>";
+        }).join("");
+        box.querySelectorAll(".target").forEach((b) => b.onclick = () => runSim(Number(b.dataset.p)));
+      }
+      }
+
+      const hist = document.getElementById("history");
+      if (!trades.length) hist.innerHTML = '<div class="empty-state"><h3>هنوز سواپی نیست</h3><p>از دکمه «خواندن از کیف‌پول» استفاده کن تا سواپ‌ها از زنجیره بیایند.</p></div>';
+      else hist.innerHTML = trades.slice().reverse().map((t, i, arr) => {
+        const feeBits = [];
+        if ((t.networkFee || 0) > 0) feeBits.push("شبکه " + fmt(t.networkFee, 6) + " TON");
+        if ((t.dexFeeUsdt || 0) > 0) feeBits.push("DEX " + fmt(t.dexFeeUsdt, 4) + " USDT");
+        const feeTxt = feeBits.length ? feeBits.join(" · ") : ((t.exact || t.source === "wallet") ? "مبالغ خالص زنجیره" : "");
+        const isBuy = t.type === "buy";
+        const title = isBuy
+          ? ("خرید " + fmt(t.gram, 4) + " GRAM")
+          : ("فروش " + fmt(t.gram, 4) + " GRAM");
+        const amount = isBuy
+          ? ("پرداخت " + fmt(t.usdt, 2) + " USDT")
+          : ("دریافت " + fmt(t.usdt, 2) + " USDT");
+        const sub = faDate(t.date)
+          + (t.source === "wallet" ? " · کیف‌پول" : " · دستی")
+          + (feeTxt ? " · " + feeTxt : "");
+        return '<div class="hist' + (i < arr.length - 1 ? ' hist-sep' : '') + '" role="listitem">'
+          + '<span class="badge ' + (isBuy ? "up" : "down") + '" aria-label="' + (isBuy ? "خرید" : "فروش") + '">' + (isBuy ? "خرید" : "فروش") + '</span>'
+          + '<div class="hist-body">'
+          + '<p class="hist-title">' + title + '</p>'
+          + '<p class="hist-amount">' + amount + '</p>'
+          + '<p class="hist-sub">' + sub + '</p>'
+          + '</div>'
+          + '<div class="hist-meta">'
+          + '<p class="hist-price">' + fmt(t.price, 4) + '</p>'
+          + '<p class="hist-price-label">قیمت اجرا</p>'
+          + '<button class="btn btn-danger btn-xs" data-id="' + t.id + '" type="button" aria-label="حذف این سواپ">حذف</button>'
+          + '</div></div>';
+      }).join("");
+      hist.querySelectorAll("[data-id]").forEach((b) => b.onclick = () => ask("حذف معامله", "این معامله حذف شود؟", () => {
+        trades = trades.filter((x) => x.id !== Number(b.dataset.id)); saveTrades(); render();
+      }));
+
+      try { drawChart(chartPts, s.avgBuyPrice || null); } catch (e) { console.error(e); }
+      try { maybeAlert(s); } catch (e) { console.error(e); }
+    }
+
+    function runSim(price) {
+      const s = calcState(trades, live);
+      if (s.totalGram <= 0) { toast("موجودی GRAM نداری"); return; }
+      if (!price || price <= 0) { toast("قیمت معتبر وارد کن"); return; }
+      const slip = estSlippagePct(s.totalGram);
+      const exec = estExecSellPrice(price, s.totalGram);
+      const usdtIdeal = s.totalGram * price;
+      const usdtNet = s.totalGram * exec;
+      const profit = usdtNet - s.investedUsdt;
+      const pct = s.investedUsdt > 0 ? (profit / s.investedUsdt) * 100 : 0;
+      document.getElementById("simPrice").value = price.toFixed(4);
+      const el = document.getElementById("simOut");
+      el.classList.remove("hidden");
+      el.innerHTML =
+        "<div><b>" + fmt(usdtNet, 2) + '</b><span class="muted">USDT بعد از لغزش ~' + slip.toFixed(2) + "٪</span></div>" +
+        "<div><b class=\"" + (profit >= 0 ? "profit" : "loss") + '">' + (profit >= 0 ? "+" : "") + fmt(profit, 2) + '</b><span class="muted">سود/زیان واقعی‌تر</span></div>' +
+        "<div><b class=\"" + (pct >= 0 ? "profit" : "loss") + '">' + (pct >= 0 ? "+" : "") + pct.toFixed(2) + '٪</b><span class="muted">mid بدون لغزش: ' + fmt(usdtIdeal, 2) + "</span></div>";
+    }
+
+    function ask(title, text, fn) {
+      confirmFn = fn;
+      const modal = document.getElementById("modal");
+      document.getElementById("modalTitle").textContent = title;
+      document.getElementById("modalText").textContent = text;
+      modal.hidden = false;
+      modal.classList.add("on");
+      const yes = document.getElementById("modalYes");
+      if (yes) yes.focus();
+    }
+
+    function closeModal() {
+      const modal = document.getElementById("modal");
+      modal.classList.remove("on");
+      modal.hidden = true;
+    }
+
+    function setType(t) {
+      tradeType = t;
+      const buy = document.getElementById("typeBuy");
+      const sell = document.getElementById("typeSell");
+      buy.className = t === "buy" ? "on-buy" : "";
+      sell.className = t === "sell" ? "on-sell" : "";
+      buy.setAttribute("aria-pressed", t === "buy" ? "true" : "false");
+      sell.setAttribute("aria-pressed", t === "sell" ? "true" : "false");
+      document.getElementById("gramLbl").textContent = t === "buy" ? "GRAM دریافتی" : "GRAM پرداختی";
+      document.getElementById("usdtLbl").textContent = t === "buy" ? "USDT پرداختی" : "USDT دریافتی";
+    }
+
+    function renderPctChips(containerId, list, kind) {
+      const el = document.getElementById(containerId);
+      if (!list.length) {
+        el.innerHTML = '<span class="muted" style="font-size:12px">هنوز موردی نیست</span>';
+        return;
+      }
+      el.innerHTML = list.map((p) =>
+        '<span class="pill ' + (kind === "profit" ? "up" : "down") + '" style="gap:6px">' +
+        (kind === "profit" ? "+" : "−") + p + "٪" +
+        '<button type="button" data-pct="' + p + '" data-kind="' + kind + '" style="background:none;border:0;color:inherit;padding:0;font-size:14px;line-height:1;cursor:pointer" title="حذف">×</button></span>'
+      ).join("");
+      el.querySelectorAll("button[data-pct]").forEach((b) => {
+        b.onclick = () => {
+          const pct = Number(b.dataset.pct);
+          if (b.dataset.kind === "profit") {
+            tg.alertTargetPcts = tg.alertTargetPcts.filter((x) => x !== pct);
+          } else {
+            tg.alertLossPcts = tg.alertLossPcts.filter((x) => x !== pct);
+          }
+          saveTg();
+          renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
+          renderPctChips("lossPctList", tg.alertLossPcts, "loss");
+        };
+      });
+    }
+
+    function bindTg() {
+      document.getElementById("tgToken").value = tg.token;
+      document.getElementById("tgChat").value = tg.chatId;
+      document.getElementById("tgEnabled").checked = !!tg.enabled;
+      document.getElementById("tgAbove").value = tg.alertAbove;
+      document.getElementById("tgBelow").value = tg.alertBelow;
+      document.getElementById("tgPriceReport").checked = !!tg.priceReport30m;
+      ["tgToken", "tgChat", "tgAbove", "tgBelow"].forEach((id) => {
+        const map = { tgToken: "token", tgChat: "chatId", tgAbove: "alertAbove", tgBelow: "alertBelow" };
+        document.getElementById(id).oninput = (e) => { tg[map[id]] = e.target.value; saveTg(); };
+      });
+      document.getElementById("tgEnabled").onchange = (e) => { tg.enabled = e.target.checked; saveTg(); toast(tg.enabled ? "هشدار فعال شد" : "هشدار خاموش شد"); };
+      document.getElementById("tgPriceReport").onchange = (e) => {
+        tg.priceReport30m = e.target.checked;
+        saveTg();
+        toast(tg.priceReport30m ? "گزارش هر ۳۰ دقیقه فعال شد" : "گزارش هر ۳۰ دقیقه خاموش شد");
+      };
+      renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
+      renderPctChips("lossPctList", tg.alertLossPcts, "loss");
+      document.getElementById("btnAddProfitPct").onclick = () => {
+        const n = Number(document.getElementById("tgPctAdd").value);
+        if (!Number.isFinite(n) || n <= 0) { toast("درصد معتبر وارد کن"); return; }
+        if (tg.alertTargetPcts.includes(n)) { toast("این درصد از قبل هست"); return; }
+        tg.alertTargetPcts.push(n);
+        tg.alertTargetPcts.sort((a, b) => a - b);
+        saveTg();
+        document.getElementById("tgPctAdd").value = "";
+        renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
+        toast("هشدار سود +" + n + "٪ اضافه شد");
+      };
+      document.getElementById("btnAddLossPct").onclick = () => {
+        const n = Number(document.getElementById("tgLossAdd").value);
+        if (!Number.isFinite(n) || n <= 0) { toast("درصد معتبر وارد کن"); return; }
+        if (tg.alertLossPcts.includes(n)) { toast("این درصد از قبل هست"); return; }
+        tg.alertLossPcts.push(n);
+        tg.alertLossPcts.sort((a, b) => a - b);
+        saveTg();
+        document.getElementById("tgLossAdd").value = "";
+        renderPctChips("lossPctList", tg.alertLossPcts, "loss");
+        toast("هشدار ضرر −" + n + "٪ اضافه شد");
+      };
+    }
+
+    async function refreshPrice(force) {
+      if (fetching && !force) return;
+      fetching = true;
+      const btn = document.getElementById("btnPrice");
+      if (btn) btn.disabled = true;
+      try {
+        await getPrice(!!force);
+        try { paintPrice(); } catch (_) {}
+        try { render(); } catch (re) { console.error(re); }
+      } catch (e) {
+        console.error("price", e);
+        try { paintPrice(); } catch (_) {}
+        const meta = document.getElementById("priceMeta");
+        if (!(live != null && Number.isFinite(Number(live)))) {
+          if (meta) meta.textContent = "در حال اتصال…";
+        } else if (meta) {
+          meta.textContent = "آخرین قیمت · در حال تلاش دوباره";
+        }
+      } finally {
+        fetching = false;
+        if (btn) btn.disabled = false;
+      }
+    }
+    async function refreshChart() {
+      document.getElementById("chartMeta").textContent = "در حال بارگذاری نمودار…";
+      try {
+        chartPts = await getChart(chartDays);
+        document.getElementById("chartMeta").textContent = chartPts.length ? (chartPts.length + " نقطه · منبع Kraken/DefiLlama") : "";
+      } catch { chartPts = []; document.getElementById("chartMeta").textContent = "نمودار در دسترس نیست"; }
+      render();
+    }
+
+    document.getElementById("typeBuy").onclick = () => setType("buy");
+    document.getElementById("typeSell").onclick = () => setType("sell");
+    document.getElementById("btnSave").onclick = () => {
+      const g = Number(document.getElementById("tGram").value);
+      const u = Number(document.getElementById("tUsdt").value);
+      const date = document.getElementById("tDate").value;
+      if (!date || !g || !u || g <= 0 || u <= 0) { toast("مقدار GRAM و USDT را وارد کن"); return; }
+      // Manual entry is treated as exact amounts you observed (no estimated fee overlay)
+      trades.push({
+        id: Date.now(), type: tradeType, date, gram: g, usdt: u,
+        networkFee: 0, dexFeeUsdt: 0, exact: true,
+        price: u / g, source: "manual"
+      });
+      saveTrades();
+      document.getElementById("tGram").value = "";
+      document.getElementById("tUsdt").value = "";
+      toast("سواپ ذخیره شد"); render();
+    };
+
+    document.getElementById("btnSim").onclick = () => runSim(Number(document.getElementById("simPrice").value));
+    document.getElementById("btnClear").onclick = () => ask("پاک‌سازی کامل", "تمام معاملات حذف می‌شود.", () => { trades = []; saveTrades(); render(); toast("تاریخچه پاک شد"); });
+    document.getElementById("modalNo").onclick = () => closeModal();
+    document.getElementById("modalYes").onclick = () => { closeModal(); if (confirmFn) confirmFn(); };
+    document.getElementById("modal").addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); closeModal(); }
+    });
+    document.getElementById("btnPrice").onclick = () => { refreshPrice(true); };
+    function openWalletSheet() {
+      const sheet = document.getElementById("walletSheet");
+      if (!sheet) return;
+      sheet.hidden = false;
+      sheet.classList.add("on");
+      const input = document.getElementById("walletAddr");
+      if (input) setTimeout(() => input.focus(), 50);
+    }
+    function closeWalletSheet() {
+      const sheet = document.getElementById("walletSheet");
+      if (!sheet) return;
+      sheet.classList.remove("on");
+      sheet.hidden = true;
+    }
+    document.getElementById("btnWallet").onclick = () => openWalletSheet();
+    document.getElementById("btnWalletClose").onclick = () => closeWalletSheet();
+    document.getElementById("walletSheet").addEventListener("click", (e) => {
+      if (e.target.id === "walletSheet") closeWalletSheet();
+    });
+    document.getElementById("walletSheet").addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); closeWalletSheet(); }
+    });
+    document.getElementById("btnSyncWallet").onclick = () => syncWallet(true);
+    document.getElementById("btnSyncNow").onclick = () => syncWallet(true);
+    document.getElementById("walletAddr").onchange = () => {
+      saveWallet(document.getElementById("walletAddr").value);
+      render();
+    };
+    document.getElementById("walletAddr").onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); syncWallet(true); }
+    };
+    document.getElementById("btnTgTest").onclick = () => {
+      sendTelegram("✅ اتصال برقرار شد\nهشدارهای GRAM از این به بعد اینجا می‌آیند.")
+        .then(() => toast("پیام تست ارسال شد"))
+        .catch((e) => toast(e.message || "ارسال ناموفق"));
+    };
+    document.getElementById("chartDays").onclick = (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      chartDays = Number(b.dataset.d);
+      document.querySelectorAll("#chartDays button").forEach((x) => {
+        const on = x === b;
+        x.classList.toggle("on", on);
+        x.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      refreshChart();
+    };
+
+    const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    document.getElementById("tDate").value = now.toISOString().slice(0, 16);
+    document.getElementById("walletAddr").value = walletAddr || "";
+    bindTg();
+    // ---- boot price (automatic, no click) ----
+    function loadCachedPrice() {
+      try {
+        const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
+        if (cached && cached.q && cached.q.usd) {
+          applyQuote(cached.q, { cached: true, stale: false });
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+    loadCachedPrice();
+    try { render(); } catch (_) {}
+
+    async function autoPriceOnce(reason) {
+      fetching = false;
+      try {
+        await getPrice(true);
+        try { paintPrice(); } catch (_) {}
+        try { render(); } catch (_) {}
+        return true;
+      } catch (e) {
+        console.error("autoPrice", reason, e);
+        return false;
+      }
+    }
+
+    // fire immediately + retries (covers slow network / first-paint races)
+    autoPriceOnce("boot");
+    setTimeout(() => { if (live == null) autoPriceOnce("retry-1s"); }, 1000);
+    setTimeout(() => { autoPriceOnce("retry-3s"); }, 3000);
+    setTimeout(() => { if (live == null) autoPriceOnce("retry-6s"); }, 6000);
+
+    setTimeout(() => { refreshChart(); }, 1000);
+    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 2500);
+    setInterval(() => { refreshPrice(false); }, 15000);
+    // auto re-sync wallet every 10 minutes
+    setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
+    setInterval(async () => {
+      if (!tg.priceReport30m || !tg.enabled || !tg.token || !tg.chatId) return;
+      try {
+        await refreshPrice(true);
+        const s = calcState(trades, live);
+        await sendTelegram(buildStatusMessage(s));
+      } catch (_) {}
+    }, 30 * 60 * 1000);
+    window.addEventListener("resize", () => drawChart(chartPts, calcState(trades, live).avgBuyPrice || null));
+  })();
+  </script>
 </body>
 </html>
