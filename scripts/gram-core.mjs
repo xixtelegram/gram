@@ -1,0 +1,459 @@
+/**
+ * Shared GRAM Swap core — used by ton-alert.mjs and (via import) the web app.
+ * Pure logic only: no DOM, no localStorage, no Telegram.
+ */
+
+export const STON_POOL = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
+export const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
+export const ROUND = 0.2;
+export const NOISE_PCT = 0.012;
+export const NOISE_FLOOR = 0.008;
+export const MIN_ACTION_PCT = 0.5;
+export const ADVICE_LEVELS = [
+  { pct: 0.5, tag: "کمی" },
+  { pct: 1, tag: "بهتر" },
+  { pct: 2, tag: "خوب" },
+  { pct: 3, tag: "خیلی خوب" },
+  { pct: 5, tag: "عالی" },
+];
+
+export function num(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function fmt(n, d = 4) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  return Number(n).toFixed(d);
+}
+
+export function noiseAbs(price) {
+  const p = price || 1;
+  return Math.max(NOISE_FLOOR, p * NOISE_PCT);
+}
+
+/** @param {number} poolTonReserve */
+export function estSlippagePct(gram, poolTonReserve = 1.7e6) {
+  const r = poolTonReserve || 1e6;
+  if (!gram || gram <= 0) return 0;
+  return Math.min(8, (gram / (r + gram)) * 100);
+}
+
+export function estExecSellPrice(mid, gram, poolTonReserve = 1.7e6) {
+  return mid * (1 - estSlippagePct(gram, poolTonReserve) / 100);
+}
+
+export function estExecBuyPrice(mid, usdt, poolTonReserve = 1.7e6) {
+  const gramApprox = mid > 0 ? usdt / mid : 0;
+  return mid * (1 + estSlippagePct(gramApprox, poolTonReserve) / 100);
+}
+
+export function isUsdt(j) {
+  if (!j) return false;
+  const s = (j.symbol || "").toUpperCase();
+  return s.startsWith("USD") || (j.address && String(j.address).toLowerCase().includes("b113a994"));
+}
+
+/** ISO or local-ish datetime string for event timestamp */
+export function eventDate(tsSec) {
+  return new Date(tsSec * 1000).toISOString();
+}
+
+/**
+ * Parse TON wallet events → swap list
+ * @returns {Array<{type,date,gram,usdt,gramSwapped?,networkFee?,dexFeeUsdt?,exact,eventId,source,price?}>}
+ */
+export function parseSwapsFromEvents(events) {
+  const out = [];
+  for (const e of events || []) {
+    const ts = e.timestamp;
+    const date = eventDate(ts);
+    const eid = e.event_id || "";
+    const actions = e.actions || [];
+    const acct = ((e.account && e.account.address) || "").toLowerCase();
+    const sameAddr = (a) => (a || "").toLowerCase() === acct;
+
+    for (const a of actions) {
+      if (a.status && a.status !== "ok") continue;
+      if (a.type !== "JettonSwap") continue;
+      const js = a.JettonSwap || {};
+      if (isUsdt(js.jetton_master_in) && js.ton_out) {
+        const usdt = Number(js.amount_in) / 1e6;
+        const gram = Number(js.ton_out) / 1e9;
+        if (usdt > 0.01 && gram > 0.01) {
+          out.push({
+            type: "buy", date, gram, usdt,
+            networkFee: 0, dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet",
+            price: usdt / gram,
+          });
+        }
+      } else if (isUsdt(js.jetton_master_out) && js.ton_in) {
+        const usdt = Number(js.amount_out) / 1e6;
+        const gram = Number(js.ton_in) / 1e9;
+        if (usdt > 0.01 && gram > 0.01) {
+          out.push({
+            type: "sell", date, gram, usdt, gramSwapped: gram,
+            networkFee: 0, dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet",
+            price: usdt / gram,
+          });
+        }
+      }
+    }
+    if (actions.some((a) => a.type === "JettonSwap")) continue;
+
+    let tonIn = 0, tonOut = 0, usdtIn = 0, usdtOut = 0, usdtRoute = 0;
+    for (const a of actions) {
+      if (a.status && a.status !== "ok") continue;
+      if (a.type === "TonTransfer") {
+        const tt = a.TonTransfer || {};
+        const amt = Number(tt.amount || 0) / 1e9;
+        if (sameAddr(tt.sender && tt.sender.address)) tonOut += amt;
+        if (sameAddr(tt.recipient && tt.recipient.address)) tonIn += amt;
+      }
+      if (a.type === "JettonTransfer") {
+        const jt = a.JettonTransfer || {};
+        if (!isUsdt(jt.jetton)) continue;
+        const amt = Number(jt.amount || 0) / 1e6;
+        const fromU = sameAddr(jt.sender && jt.sender.address);
+        const toU = sameAddr(jt.recipient && jt.recipient.address);
+        if (fromU) usdtOut += amt;
+        if (toU) usdtIn += amt;
+        if (!fromU && !toU) usdtRoute = Math.max(usdtRoute, amt);
+      }
+    }
+    const extraTon = typeof e.extra === "number" ? Math.abs(e.extra) / 1e9 : 0;
+
+    if (tonOut > 1 && usdtIn > 0.5 && tonOut > tonIn) {
+      const refund = tonIn < 0.5 ? tonIn : 0;
+      const gramSwapped = tonOut;
+      const gramInv = tonOut - refund;
+      const usdt = usdtIn - usdtOut;
+      const dexFeeUsdt = usdtRoute > usdt ? +(usdtRoute - usdt).toFixed(6) : 0;
+      out.push({
+        type: "sell", date,
+        gram: +gramInv.toFixed(9),
+        gramSwapped: +gramSwapped.toFixed(9),
+        usdt: +usdt.toFixed(6),
+        networkFee: +extraTon.toFixed(9),
+        dexFeeUsdt, exact: true, eventId: eid, source: "wallet",
+        price: usdt / (gramSwapped || gramInv),
+      });
+    } else if (tonIn > 1 && usdtOut > 0.5 && tonIn > tonOut) {
+      const gasOut = tonOut < 0.5 ? tonOut : 0;
+      const gram = tonIn - (tonOut > 0.5 ? tonOut : 0);
+      const usdt = usdtOut - usdtIn;
+      out.push({
+        type: "buy", date,
+        gram: +gram.toFixed(9), usdt: +usdt.toFixed(6),
+        networkFee: +Math.max(extraTon, gasOut).toFixed(9),
+        dexFeeUsdt: 0, exact: true, eventId: eid, source: "wallet",
+        price: usdt / gram,
+      });
+    }
+  }
+  const seen = new Set();
+  return out.filter((s) => {
+    const k = s.eventId || (s.date + s.type + Number(s.gram).toFixed(4));
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return s.gram > 0.5 && s.usdt > 0.5;
+  });
+}
+
+function takeFromInv(inv, amount) {
+  let left = amount, cost = 0;
+  while (left > 1e-12 && inv.length) {
+    const lot = inv[0];
+    const take = Math.min(lot.gram, left);
+    cost += take * lot.costPer;
+    lot.gram -= take;
+    left -= take;
+    if (lot.gram <= 1e-12) inv.shift();
+  }
+  return { cost, filled: amount - left };
+}
+
+/**
+ * Ledger + optional chain balances.
+ * @param {object} [walletBal] { ton, usdt }
+ */
+export function calcState(list, price, walletBal = null) {
+  const sorted = (list || []).slice().sort((a, b) => new Date(a.date) - new Date(b.date) || (a.id || 0) - (b.id || 0));
+  let totalFeesGram = 0, totalFeesUsdt = 0, realizedPnl = 0;
+  const inv = [];
+  let lastSwapPnl = null, lastSwapPct = null, lastSwapType = null, lastSwapPrice = null;
+  let flowUsdt = 0;
+
+  for (const t of sorted) {
+    const isExact = t.exact === true || t.source === "wallet";
+    const netFeeGram = Math.max(0, t.networkFee || 0);
+    const dexFeeUsdt = Math.max(0, t.dexFeeUsdt || 0);
+    const legacyDexPct = (!isExact && t.dexFeePct != null) ? Math.max(0, t.dexFeePct) / 100 : 0;
+    totalFeesGram += netFeeGram;
+    totalFeesUsdt += dexFeeUsdt;
+    const px = t.price > 0 ? t.price : (t.gram > 0 ? t.usdt / t.gram : null);
+
+    if (t.type === "buy") {
+      const payUsdt = t.usdt;
+      const recvGram = isExact ? t.gram : Math.max(0, t.gram * (1 - legacyDexPct) - netFeeGram);
+      flowUsdt -= payUsdt;
+      if (recvGram > 1e-12) inv.push({ gram: recvGram, costPer: payUsdt / recvGram });
+      lastSwapPnl = px != null ? recvGram * px - payUsdt : null;
+    } else {
+      let invGram = 0;
+      for (const lot of inv) invGram += lot.gram;
+      const wantSell = t.gram;
+      const sellGram = Math.min(wantSell, invGram);
+      const fillRatio = wantSell > 1e-12 ? sellGram / wantSell : 0;
+      const recvUsdtFull = isExact ? t.usdt : t.usdt * (1 - legacyDexPct);
+      const recvUsdt = recvUsdtFull * fillRatio;
+      const sellTake = takeFromInv(inv, sellGram);
+      flowUsdt += recvUsdt;
+      const rp = recvUsdt - sellTake.cost;
+      realizedPnl += rp;
+      lastSwapPnl = rp;
+    }
+    lastSwapPct = (t.usdt > 0 && lastSwapPnl != null) ? (lastSwapPnl / t.usdt) * 100 : null;
+    lastSwapType = t.type;
+    lastSwapPrice = px;
+  }
+
+  let bookGram = 0, remainingCost = 0;
+  for (const lot of inv) {
+    bookGram += lot.gram;
+    remainingCost += lot.gram * lot.costPer;
+  }
+  const avg = bookGram > 0 ? remainingCost / bookGram : 0;
+  const totalGram = walletBal ? walletBal.ton : bookGram;
+  const cashUsdt = walletBal ? walletBal.usdt : Math.max(0, flowUsdt);
+  const currentValue = price ? totalGram * price : 0;
+  const equity = cashUsdt + currentValue;
+  const costForMark = bookGram > 1e-12 ? remainingCost * Math.min(1, totalGram / bookGram) : 0;
+  const unrealizedPnl = currentValue - costForMark;
+  const totalPnl = realizedPnl + unrealizedPnl;
+
+  return {
+    totalGram,
+    cashUsdt,
+    bookGram,
+    avgBuyPrice: avg,
+    investedUsdt: costForMark,
+    currentValue,
+    equity,
+    totalPnl,
+    unrealizedPnl,
+    totalFeesGram,
+    totalFeesUsdt,
+    realizedPnl,
+    lastSwapPnl,
+    lastSwapPct,
+    lastSwapType,
+    lastSwapPrice,
+    fromWallet: !!walletBal,
+    // aliases for alert script
+    gram: totalGram,
+    cash: cashUsdt,
+    avg,
+    invested: costForMark,
+    value: currentValue,
+  };
+}
+
+export function lastTrade(list) {
+  if (!list || !list.length) return null;
+  return list.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || (b.id || 0) - (a.id || 0))[0];
+}
+
+export function positionStance(s) {
+  const hasGram = s && s.totalGram > 1e-6;
+  const hasUsdt = s && s.cashUsdt > 1e-6;
+  if (hasGram && !hasUsdt) return { mode: "hold_gram", label: "GRAM داری", action: "sell" };
+  if (hasUsdt && !hasGram) return { mode: "hold_usdt", label: "USDT داری", action: "buy" };
+  if (hasGram && hasUsdt) {
+    const gVal = s.totalGram * (s.avgBuyPrice || 0);
+    if (gVal >= s.cashUsdt) return { mode: "hold_gram", label: "بیشتر GRAM داری", action: "sell" };
+    return { mode: "hold_usdt", label: "بیشتر USDT داری", action: "buy" };
+  }
+  return { mode: "empty", label: "پوزیشن مشخصی نیست", action: null };
+}
+
+export function sellIsWorthwhile(s, price, poolTonReserve = 1.7e6) {
+  if (!s || !s.avgBuyPrice || s.totalGram <= 0 || !price) return false;
+  const exec = estExecSellPrice(price, s.totalGram, poolTonReserve);
+  const pct = ((exec - s.avgBuyPrice) / s.avgBuyPrice) * 100;
+  return pct >= MIN_ACTION_PCT && (exec - s.avgBuyPrice) >= noiseAbs(price) * 0.5;
+}
+
+export function buyIsWorthwhile(s, price, poolTonReserve = 1.7e6) {
+  if (!price || !s) return false;
+  const ref = s.lastSwapType === "sell" && s.lastSwapPrice ? s.lastSwapPrice : null;
+  const exec = s.cashUsdt > 0 ? estExecBuyPrice(price, s.cashUsdt, poolTonReserve) : price;
+  if (ref != null) {
+    const pct = ((ref - exec) / ref) * 100;
+    return pct >= MIN_ACTION_PCT && (ref - exec) >= noiseAbs(price) * 0.5;
+  }
+  return true;
+}
+
+/** Beginner-friendly last-swap advice block for Telegram + UI */
+export function lastSwapAdviceBlock(s, price, poolTonReserve = 1.7e6) {
+  const ltType = s && s.lastSwapType;
+  const ref = s && s.lastSwapPrice;
+  if (!ltType || !(ref > 0)) return "";
+  const pad = 1 - ROUND / 100;
+  let out = "\n\nپیشنهاد:";
+  if (ltType === "buy") {
+    const curPct = price ? ((price - ref) / ref) * 100 : null;
+    out += `\nآخرین خرید تو: ${fmt(ref)} USDT`;
+    if (price) out += `\nقیمت الان:     ${fmt(price)} USDT`;
+    if (curPct != null) {
+      out += `\nیعنی حدود ${curPct >= 0 ? "+" : "−"}${Math.abs(curPct).toFixed(2)}٪ ${curPct >= 0 ? "بالاتر" : "پایین‌تر"} از خرید`;
+    }
+    if (s.totalGram > 0) {
+      out += `\n\nوضعیت تو: GRAM داری` + (s.cashUsdt > 0 ? ` (و ${fmt(s.cashUsdt, 2)} USDT)` : "");
+    }
+    if (curPct != null && curPct >= MIN_ACTION_PCT) {
+      out += "\nاگر بفروشی، نسبت به خریدت در سودی (لغزش استخر را در نظر بگیر).";
+    } else {
+      out += "\nبرای فروش بهتر است صبر کنی تا نزدیک اهداف زیر برسد.";
+    }
+    out += "\n\nاهداف فروش پیشنهادی:";
+    for (const L of ADVICE_LEVELS) {
+      const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram, poolTonReserve) / 100 : 0;
+      const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+      out += `\n• ${L.tag} (+${L.pct}٪): حدود ${fmt(midNeed)}`;
+    }
+  } else {
+    const curPct = price ? ((ref - price) / ref) * 100 : null;
+    out += `\nآخرین فروش تو: ${fmt(ref)} USDT`;
+    if (price) out += `\nقیمت الان:     ${fmt(price)} USDT`;
+    if (curPct != null) {
+      out += `\nیعنی حدود ${curPct >= 0 ? "−" : "+"}${Math.abs(curPct).toFixed(2)}٪ ${curPct >= 0 ? "ارزان‌تر" : "گران‌تر"} از وقتی فروختی`;
+    }
+    out += `\n\nوضعیت تو: ${s.cashUsdt > 0 ? `USDT داری (حدود ${fmt(s.cashUsdt, 2)})` : "USDT کمی داری"}`;
+    if (s.totalGram > 1e-6) out += " · کمی هم GRAM داری";
+    if (curPct != null && curPct >= MIN_ACTION_PCT) {
+      out += "\nاگر دوباره بخری، نسبت به فروش قبلی‌ات جا برای سود داری.";
+    } else {
+      out += "\nعجله نکن. برای خرید دوباره بهتر است صبر کنی تا نزدیک اهداف پایین بیاید:";
+    }
+    out += "\n\nاهداف خرید پیشنهادی:";
+    for (const L of ADVICE_LEVELS) {
+      const target = ref * (1 - L.pct / 100) * pad;
+      out += `\n• ${L.tag} (−${L.pct}٪): حدود ${fmt(target)}`;
+    }
+  }
+  return out;
+}
+
+export function stanceLine(s, price, poolTonReserve = 1.7e6) {
+  const stance = positionStance(s);
+  let line = "";
+  if (stance.mode === "hold_gram") {
+    line = "وضعیت تو: GRAM داری";
+    if (s.avgBuyPrice) {
+      line += `\nمیانگین ورود: ${fmt(s.avgBuyPrice)}`;
+      if (price) {
+        const pct = ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100;
+        line += `\nنسبت به ورود: ${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}٪`;
+      }
+    }
+  } else if (stance.mode === "hold_usdt") {
+    line = "وضعیت تو: USDT داری" + (s.cashUsdt > 0 ? ` (حدود ${fmt(s.cashUsdt, 2)})` : "");
+    if (s.totalGram > 1e-6) line += `\nکمی هم GRAM داری: ${fmt(s.totalGram, 4)}`;
+  } else {
+    line = "وضعیت تو: پوزیشن مشخصی نیست";
+  }
+  line += lastSwapAdviceBlock(s, price, poolTonReserve);
+  return line;
+}
+
+/** Structured advice for UI cards */
+export function buildAdvice(s, price, poolTonReserve = 1.7e6) {
+  const ref = s.lastSwapPrice;
+  const type = s.lastSwapType;
+  if (!type || !(ref > 0)) {
+    return { hint: "هنوز سواپی ثبت نشده — همگام‌سازی کیف‌پول را بزن", meta: "", rows: [], lastType: null, ref: null, suggest: null };
+  }
+  const pad = 1 - ROUND / 100;
+  const rows = [];
+  if (type === "buy") {
+    const curPct = price > 0 ? ((price - ref) / ref) * 100 : null;
+    let hint = `آخرین سواپ: خرید GRAM @ ${fmt(ref)}`;
+    if (curPct != null) {
+      hint += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? "سود " : "ضرر "}${Math.abs(curPct).toFixed(2)}٪ نسبت به خرید`;
+    }
+    for (const L of ADVICE_LEVELS) {
+      const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram, poolTonReserve) / 100 : 0;
+      const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+      rows.push({
+        label: `فروش +${L.pct}٪`,
+        price: midNeed,
+        detail: `${L.tag} — mid حدود ${fmt(midNeed)}`,
+      });
+    }
+    const suggest = curPct != null && curPct >= MIN_ACTION_PCT ? "to_usdt" : null;
+    if (suggest) hint += "\n✅ بعد از لغزش در سود معنادار هستی — می‌توانی بفروشی";
+    else if (curPct != null && curPct < 0) hint += `\nمنتظر برگشت بالای ${fmt(ref)} بمان`;
+    return { hint, meta: "مرجع = قیمت سواپ آخر (خرید)", rows, lastType: "buy", ref, suggest, breakEven: ref / pad, beExact: ref };
+  }
+  const curPct = price > 0 ? ((ref - price) / ref) * 100 : null;
+  let hint = `آخرین سواپ: فروش GRAM @ ${fmt(ref)}`;
+  if (curPct != null) {
+    hint += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? curPct.toFixed(2) + "٪ ارزان‌تر از فروش" : Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش"}`;
+  }
+  for (const L of ADVICE_LEVELS) {
+    const target = ref * (1 - L.pct / 100) * pad;
+    rows.push({
+      label: `خرید −${L.pct}٪`,
+      price: target,
+      detail: `${L.tag} — زیر ${fmt(target)}`,
+    });
+  }
+  const suggest = curPct != null && curPct >= MIN_ACTION_PCT ? "to_gram" : null;
+  if (suggest) hint += "\n✅ نسبت به فروش آخر ارزان‌تر شده — می‌توانی دوباره بخری";
+  else hint += "\nمنتظر ریزش زیر اهداف خرید بمان";
+  return { hint, meta: "مرجع = قیمت سواپ آخر (فروش)", rows, lastType: "sell", ref, suggest, breakEven: ref * pad, beExact: ref };
+}
+
+export function detectMomentum(series) {
+  if (!series || series.length < 4) {
+    return { dir: "flat", delta: 0, from: null, to: null, noise: NOISE_FLOOR, medDir: "flat" };
+  }
+  const shortN = Math.min(series.length, 20);
+  const medN = Math.min(series.length, 60);
+  const short = series.slice(-shortN);
+  const med = series.slice(-medN);
+  const nAbs = noiseAbs(short[short.length - 1].p);
+  function win(arr) {
+    const from = arr[0].p, to = arr[arr.length - 1].p, delta = to - from;
+    let up = 0, down = 0;
+    for (let i = 1; i < arr.length; i++) {
+      const d = arr[i].p - arr[i - 1].p;
+      if (d >= nAbs) up++;
+      else if (d <= -nAbs) down++;
+    }
+    let dir = "flat";
+    if (Math.abs(delta) >= nAbs) {
+      if (delta > 0 && up >= down) dir = "up";
+      else if (delta < 0 && down >= up) dir = "down";
+    }
+    return { dir, delta, from, to };
+  }
+  const s = win(short), m = win(med);
+  let dir = s.dir;
+  if (s.dir !== "flat" && m.dir !== "flat" && s.dir !== m.dir) dir = "flat";
+  else if (s.dir === "flat" && m.dir !== "flat") dir = m.dir;
+  return { dir, delta: s.delta, from: s.from, to: s.to, noise: nAbs, medDir: m.dir };
+}
+
+/** Reconcile note for UI */
+export function reconcileNote(s) {
+  if (!s || !s.fromWallet) return "بعد از همگام‌سازی، موجودی از کیف‌پول خوانده می‌شود.";
+  const d = Math.abs((s.bookGram || 0) - (s.totalGram || 0));
+  if (d > 0.5) {
+    return `✓ موجودی از کیف‌پول · دفتر سواپ‌ها ${fmt(s.bookGram, 4)} GRAM (اختلاف ${fmt(d, 4)} احتمالاً واریز/برداشت غیرسواپ یا تاریخچه ناقص)`;
+  }
+  return `✓ موجودی از کیف‌پول · دفتر سواپ با زنجیره هم‌خوان است`;
+}
