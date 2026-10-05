@@ -196,6 +196,13 @@
     <div class="stats" id="stats1"></div>
     <div class="stats three" id="stats2"></div>
 
+    <section class="card" id="adviceBox" style="margin-bottom:22px;border-color:rgba(20,184,166,.35)">
+      <p class="muted" style="margin:0">پیشنهاد بر اساس سواپ آخر</p>
+      <p id="adviceText" style="margin:8px 0 0;font-weight:700;font-size:1.05rem;line-height:1.7"></p>
+      <p class="muted" id="adviceMeta" style="margin:8px 0 0"></p>
+      <div id="adviceTargets" style="display:grid;gap:8px;margin-top:12px"></div>
+    </section>
+
     <section class="card" style="margin-bottom:22px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
         <h2 style="margin:0">نمودار قیمت</h2>
@@ -228,18 +235,20 @@
         <div><label>هشدار اگر قیمت پایین‌تر از</label><input id="tgBelow" inputmode="decimal" placeholder="1.40" /></div>
       </div>
       <div style="margin-top:14px">
-        <label>هشدار درصد سود پوزیشن</label>
+        <label>هشدار سود نسبت به سواپ آخر (٪)</label>
+        <p class="muted" style="margin:0 0 6px;font-size:11px">اگر آخرین سواپ خرید GRAM بوده → رشد قیمت؛ اگر فروش بوده → فرصت خرید ارزان‌تر</p>
         <div id="profitPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px"></div>
         <div class="row" style="align-items:flex-end">
-          <div style="flex:1;min-width:100px"><input id="tgPctAdd" inputmode="decimal" placeholder="مثلاً ۵" /></div>
+          <div style="flex:1;min-width:100px"><input id="tgPctAdd" inputmode="decimal" placeholder="مثلاً ۱.۵" /></div>
           <button class="btn btn-ghost" id="btnAddProfitPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
         </div>
       </div>
       <div style="margin-top:14px">
-        <label>هشدار درصد ضرر پوزیشن</label>
+        <label>هشدار ضرر نسبت به سواپ آخر (٪)</label>
+        <p class="muted" style="margin:0 0 6px;font-size:11px">اگر خرید بوده → افت زیر قیمت خرید؛ اگر فروش بوده → رشد دوباره بالای قیمت فروش</p>
         <div id="lossPctList" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px"></div>
         <div class="row" style="align-items:flex-end">
-          <div style="flex:1;min-width:100px"><input id="tgLossAdd" inputmode="decimal" placeholder="مثلاً ۳" /></div>
+          <div style="flex:1;min-width:100px"><input id="tgLossAdd" inputmode="decimal" placeholder="مثلاً ۱" /></div>
           <button class="btn btn-ghost" id="btnAddLossPct" type="button" style="width:auto;padding-inline:14px">افزودن</button>
         </div>
       </div>
@@ -256,12 +265,6 @@
       <div class="row" style="margin-top:12px">
         <button class="btn btn-ghost" id="btnTgTest" type="button">پیام تست</button>
       </div>
-    </section>
-
-    <section class="card" id="adviceBox" style="margin-bottom:22px">
-      <p class="muted" style="margin:0">راهنمای سواپ بعدی</p>
-      <p id="adviceText" style="margin:6px 0 0;font-weight:600"></p>
-      <p class="muted" id="adviceMeta" style="margin:4px 0 0"></p>
     </section>
 
     <section style="margin-bottom:22px">
@@ -626,7 +629,7 @@
     }
     // starting capital removed — balances & PnL come from wallet + trades only
     function loadTg() {
-      const d = { token: "", chatId: "", enabled: false, alertAbove: "", alertBelow: "", alertTargetPcts: [5], alertLossPcts: [], priceReport30m: false };
+      const d = { token: "", chatId: "", enabled: false, alertAbove: "", alertBelow: "", alertTargetPcts: [0.5, 1, 1.5, 2, 2.5, 3], alertLossPcts: [0.5, 1, 1.5, 2], priceReport30m: false };
       try {
         const raw = JSON.parse(localStorage.getItem(TGKEY) || "{}");
         const merged = { ...d, ...raw };
@@ -739,38 +742,75 @@
       };
     }
 
+    /** Last swap from ledger (most recent by date) */
+    function lastTrade() {
+      if (!trades.length) return null;
+      return trades.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id)[0];
+    }
+
+    /**
+     * Suggestion card based on last swap.
+     * buy last → show sell targets (+pct from last price)
+     * sell last → show buy targets (−pct from last price)
+     */
     function nextAdvice(s, price) {
+      const lt = lastTrade();
       const pad = 1 - ROUND / 100;
-      if (s.totalGram > 1e-6 && s.avgBuyPrice > 0) {
-        const beExact = s.avgBuyPrice;
-        const beSafe = beExact / pad; // +ROUND% safety for display
-        const exec = price > 0 ? estExecSellPrice(price, s.totalGram) : null;
-        let hint = "سربه‌سر دقیق: " + beExact.toFixed(4) + " · با حاشیه " + ROUND + "٪: " + beSafe.toFixed(4);
-        if (exec != null) {
-          const slip = estSlippagePct(s.totalGram);
-          hint += " · تخمین اجرا با لغزش ~" + slip.toFixed(2) + "٪: " + exec.toFixed(4);
-          if (exec >= beExact * (1 + MIN_ACTION_PCT / 100)) {
-            hint += " — بعد از لغزش هنوز سود معنادار داری؛ می‌توانی بفروشی";
-          } else if (exec >= beExact) {
-            hint += " — نزدیک سربه‌سر بعد از لغزش؛ فروش اجباری نیست";
-          } else {
-            const need = ((beExact / (1 - slip / 100)) - price) / price * 100;
-            hint += " — برای سود بعد از لغزش حدود " + need.toFixed(1) + "٪ رشد mid لازم است";
-          }
+      if (!lt || !(lt.price > 0)) {
+        return { breakEven: null, suggest: null, hint: "هنوز سواپی ثبت نشده — همگام‌سازی کیف‌پول را بزن", meta: "", rows: [] };
+      }
+      const ref = lt.price;
+      const rows = [];
+
+      if (lt.type === "buy") {
+        // Holding GRAM after buy — when to sell
+        const curPct = price > 0 ? ((price - ref) / ref) * 100 : null;
+        const exec = (price > 0 && s.totalGram > 0) ? estExecSellPrice(price, s.totalGram) : null;
+        const execPct = exec != null ? ((exec - ref) / ref) * 100 : null;
+        let hint = "آخرین سواپ: خرید GRAM @ " + fmt(ref, 4);
+        if (curPct != null) {
+          hint += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? "سود " : "ضرر ") + Math.abs(curPct).toFixed(2) + "٪ نسبت به خرید";
         }
-        return { breakEven: beSafe, beExact, suggest: "to_usdt", hint: hint };
+        if (execPct != null) {
+          hint += "\nبا لغزش تخمینی: " + fmt(exec, 4) + " (" + (execPct >= 0 ? "+" : "") + execPct.toFixed(2) + "٪)";
+        }
+        const levels = [0.5, 1, 1.5, 2, 3, 5];
+        for (const pct of levels) {
+          const midNeed = ref * (1 + pct / 100) / pad;
+          const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram) / 100 : 0;
+          const midForExec = ref * (1 + pct / 100) / Math.max(0.5, 1 - slip);
+          rows.push({
+            label: "فروش +" + pct + "٪",
+            price: midForExec,
+            detail: "هدف mid ≈ " + fmt(midForExec, 4) + " تا بعد از لغزش حدود +" + pct + "٪ بماند"
+          });
+        }
+        const suggest = (execPct != null && execPct >= MIN_ACTION_PCT) ? "to_usdt" : null;
+        if (suggest) hint += "\n✅ بعد از لغزش در سود معنادار هستی — می‌توانی بفروشی";
+        else if (curPct != null && curPct < 0) hint += "\nمنتظر برگشت بالای " + fmt(ref, 4) + " بمان";
+        return { breakEven: ref / pad, beExact: ref, suggest, hint, meta: "مرجع = قیمت سواپ آخر (خرید)", rows, lastType: "buy", ref };
       }
-      if (s.cashUsdt > 1e-6 && s.lastSwapPrice && s.lastSwapType === "sell") {
-        const tb = s.lastSwapPrice * pad;
-        const execBuy = price > 0 ? estExecBuyPrice(price, s.cashUsdt) : null;
-        let hint = "مرجع آخرین فروش: " + s.lastSwapPrice.toFixed(4) + " · هدف خرید با حاشیه: " + tb.toFixed(4);
-        if (execBuy != null && execBuy <= tb) hint += " — قیمت اجرا مناسب خرید است";
-        else if (price > 0 && price <= tb) hint += " — mid مناسب است؛ لغزش را در نظر بگیر";
-        else hint += " — منتظر ریزش بیشتر بمان";
-        return { breakEven: tb, suggest: "to_gram", hint: hint };
+
+      // last was sell — holding USDT, when to buy back
+      const curPct = price > 0 ? ((ref - price) / ref) * 100 : null; // positive = cheaper than sell
+      const execBuy = (price > 0 && s.cashUsdt > 0) ? estExecBuyPrice(price, s.cashUsdt) : null;
+      let hint = "آخرین سواپ: فروش GRAM @ " + fmt(ref, 4);
+      if (curPct != null) {
+        hint += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? (curPct.toFixed(2) + "٪ ارزان‌تر از فروش") : (Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش"));
       }
-      if (s.cashUsdt > 1e-6) return { breakEven: price, suggest: "to_gram", hint: "USDT داری — با سواپ به GRAM پوزیشن باز کن (قیمت mid از DEX)" };
-      return { breakEven: null, suggest: null, hint: "هنوز سواپی ثبت نشده" };
+      const levels = [0.5, 1, 1.5, 2, 3, 5];
+      for (const pct of levels) {
+        const target = ref * (1 - pct / 100) * pad;
+        rows.push({
+          label: "خرید −" + pct + "٪",
+          price: target,
+          detail: "زیر " + fmt(target, 4) + " نسبت به فروش آخر حدود +" + pct + "٪ جا برای سود دور بعد"
+        });
+      }
+      const suggest = (curPct != null && curPct >= MIN_ACTION_PCT) ? "to_gram" : null;
+      if (suggest) hint += "\n✅ نسبت به فروش آخر ارزان‌تر شده — می‌توانی دوباره بخری";
+      else hint += "\nمنتظر ریزش زیر اهداف خرید بمان";
+      return { breakEven: ref * pad, beExact: ref, suggest, hint, meta: "مرجع = قیمت سواپ آخر (فروش)", rows, lastType: "sell", ref };
     }
 
     async function fetchJson(url, ms) {
@@ -1101,27 +1141,54 @@
         sent = true;
       }
 
-      // --- profit / loss targets on open GRAM position ---
-      if (state.investedUsdt > 0) {
-        const curPct = (state.unrealizedPnl / state.investedUsdt) * 100;
-        for (const targetPct of profitPcts) {
-          const key = "profit_" + targetPct;
-          if (curPct >= targetPct && !recently(key)) {
-            mark(key);
-            sendTelegram("✅ هدف سود " + targetPct + "٪ رسید\nسود فعلی " + curPct.toFixed(2) + "٪ · قیمت " + fmt(live, 4) + "\n" + stanceLine(stance, state, live) + "\nاگر روند صعودی ادامه دارد می‌توانی کمی صبر کنی؛ اگر برگشت، بفروش")
-              .then(() => toast("هشدار سود ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
-            sent = true;
-            break;
+      // --- profit / loss vs LAST SWAP price (real relative move) ---
+      const lt = lastTrade();
+      if (lt && lt.price > 0) {
+        const ref = lt.price;
+        const movePct = ((live - ref) / ref) * 100; // + = price up since last swap
+        if (lt.type === "buy") {
+          // bought: profit when price up, loss when price down
+          for (const targetPct of profitPcts) {
+            const key = "ls_profit_buy_" + targetPct;
+            if (movePct >= targetPct && !recently(key)) {
+              mark(key);
+              sendTelegram("✅ سود +" + targetPct + "٪ نسبت به خرید آخر\nخرید @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (" + (movePct >= 0 ? "+" : "") + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live) + "\nمی‌توانی فروش را در نظر بگیری")
+                .then(() => toast("هشدار سود ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
           }
-        }
-        for (const lossPct of lossPcts) {
-          const key = "loss_" + lossPct;
-          if (curPct <= -lossPct && !recently(key)) {
-            mark(key);
-            sendTelegram("⚠️ هشدار ضرر " + lossPct + "٪\nزیان فعلی " + curPct.toFixed(2) + "٪ · قیمت " + fmt(live, 4) + "\n" + stanceLine(stance, state, live))
-              .then(() => toast("هشدار ضرر ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
-            sent = true;
-            break;
+          for (const lossPct of lossPcts) {
+            const key = "ls_loss_buy_" + lossPct;
+            if (movePct <= -lossPct && !recently(key)) {
+              mark(key);
+              sendTelegram("⚠️ ضرر −" + lossPct + "٪ نسبت به خرید آخر\nخرید @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (" + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live))
+                .then(() => toast("هشدار ضرر ارسال شد")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
+          }
+        } else if (lt.type === "sell") {
+          // sold: "profit" = price dropped (buy cheaper), "loss" = price rose (missed)
+          for (const targetPct of profitPcts) {
+            const key = "ls_profit_sell_" + targetPct;
+            if (movePct <= -targetPct && !recently(key)) {
+              mark(key);
+              sendTelegram("✅ فرصت خرید: −" + targetPct + "٪ زیر فروش آخر\nفروش @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (" + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live) + "\nمی‌توانی دوباره GRAM بخری")
+                .then(() => toast("هشدار فرصت خرید")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
+          }
+          for (const lossPct of lossPcts) {
+            const key = "ls_loss_sell_" + lossPct;
+            if (movePct >= lossPct && !recently(key)) {
+              mark(key);
+              sendTelegram("⚠️ قیمت +" + lossPct + "٪ بالای فروش آخر رفت\nفروش @ " + fmt(ref, 4) + " → الان " + fmt(live, 4) + " (+" + movePct.toFixed(2) + "٪)\n" + stanceLine(stance, state, live) + "\nاگر هنوز USDT داری، عجله نکن — صبر برای اصلاح")
+                .then(() => toast("هشدار رشد بعد از فروش")).catch(() => toast("هشدار ارسال نشد"));
+              sent = true;
+              break;
+            }
           }
         }
       }
@@ -1212,10 +1279,32 @@
           ? ("کارمزد دقیق از زنجیره: شبکه " + fmt(feeG, 6) + " GRAM" + (feeU > 0 ? " · DEX " + fmt(feeU, 4) + " USDT" : "") + " · بدون تخمین")
           : "مبالغ سواپ از زنجیره دقیق‌اند · کارمزد DEX داخل مبلغ خالص لحاظ شده";
       }
-      document.getElementById("adviceText").textContent = adv.hint;
-      document.getElementById("adviceMeta").textContent = adv.breakEven != null
-        ? ("قیمت مرجع: " + fmt(adv.breakEven, 4) + (adv.suggest === "to_usdt" ? " (سواپ به USDT)" : adv.suggest === "to_gram" ? " (سواپ به GRAM)" : ""))
-        : "";
+      const adviceEl = document.getElementById("adviceText");
+      if (adviceEl) adviceEl.innerHTML = (adv.hint || "").replace(/\n/g, "<br>");
+      const adviceMeta = document.getElementById("adviceMeta");
+      if (adviceMeta) {
+        adviceMeta.textContent = adv.meta
+          ? (adv.meta + (adv.ref ? " · " + fmt(adv.ref, 4) : "") + (adv.suggest === "to_usdt" ? " · پیشنهاد: فروش" : adv.suggest === "to_gram" ? " · پیشنهاد: خرید" : ""))
+          : "";
+      }
+      const adviceTargets = document.getElementById("adviceTargets");
+      if (adviceTargets) {
+        if (adv.rows && adv.rows.length) {
+          adviceTargets.innerHTML = adv.rows.map((r) =>
+            '<button class="target" type="button" data-p="' + r.price + '"><span class="' + (adv.lastType === "buy" ? "profit" : "loss") + '" style="font-weight:800">' + r.label + '</span><span><b style="display:block;font-variant-numeric:tabular-nums">' + fmt(r.price, 4) + '</b><span class="muted">' + r.detail + "</span></span></button>"
+          ).join("");
+          adviceTargets.querySelectorAll(".target").forEach((b) => {
+            b.onclick = () => {
+              const p = Number(b.dataset.p);
+              document.getElementById("simPrice").value = p.toFixed(4);
+              if (adv.lastType === "buy") runSim(p);
+              else toast("هدف خرید: " + fmt(p, 4) + " — وقتی mid نزدیک این عدد شد بخر");
+            };
+          });
+        } else {
+          adviceTargets.innerHTML = "";
+        }
+      }
       document.getElementById("livePrice").textContent = live != null ? fmt(live, 4) : "—";
       const pill = document.getElementById("chgPill");
       if (quote && quote.change24h != null) {
