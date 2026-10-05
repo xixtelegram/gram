@@ -1472,15 +1472,17 @@
       syncing = true;
       syncWallet._since = Date.now();
       const meta = document.getElementById("walletSyncMeta");
-      meta.textContent = "در حال خواندن تاریخچه و موجودی…";
+      if (meta) meta.textContent = "در حال خواندن تاریخچه و موجودی…";
       try {
         let bal = null;
         try { bal = await fetchWalletBalances(addr); } catch (_) {}
         const remote = await fetchWalletSwaps(addr, 3);
         if (!remote.length) {
-          meta.textContent = bal
-            ? ("سواپی یافت نشد · زنجیره: " + fmt(bal.ton, 4) + " GRAM · " + fmt(bal.usdt, 2) + " USDT")
-            : "سواپی یافت نشد";
+          if (meta) {
+            meta.textContent = bal
+              ? ("سواپی یافت نشد · زنجیره: " + fmt(bal.ton, 4) + " GRAM · " + fmt(bal.usdt, 2) + " USDT")
+              : "سواپی یافت نشد";
+          }
           toast("سواپ GRAM/USDT در تاریخچه پیدا نشد");
           render();
           return;
@@ -1494,9 +1496,10 @@
             const ex = trades.find((t) => t.eventId === s.eventId);
             if (ex) {
               ex.gram = s.gram; ex.usdt = s.usdt; ex.gramSwapped = s.gramSwapped;
-              ex.price = s.usdt / (s.gramSwapped || s.gram);
+              ex.price = s.usdt / (s.gramSwapped || s.gram || 1);
               ex.networkFee = s.networkFee || 0; ex.dexFeeUsdt = s.dexFeeUsdt || 0;
               ex.exact = true; ex.source = "wallet";
+              updated++;
             }
             continue;
           }
@@ -1512,7 +1515,7 @@
             match.gram = s.gram;
             match.usdt = s.usdt;
             match.gramSwapped = s.gramSwapped;
-            match.price = s.usdt / (s.gramSwapped || s.gram);
+            match.price = s.usdt / (s.gramSwapped || s.gram || 1);
             match.networkFee = s.networkFee || 0;
             match.dexFeeUsdt = s.dexFeeUsdt || 0;
             delete match.dexFeePct;
@@ -1529,7 +1532,7 @@
             networkFee: s.networkFee || 0,
             dexFeeUsdt: s.dexFeeUsdt || 0,
             exact: true,
-            price: s.usdt / (s.gramSwapped || s.gram),
+            price: s.usdt / (s.gramSwapped || s.gram || 1),
             eventId: s.eventId,
             source: "wallet"
           });
@@ -1548,7 +1551,7 @@
             balTxt += " · دفتر سواپ " + fmt(s.bookGram, 4) + " GRAM";
           }
         }
-        meta.textContent = remote.length + " سواپ · +" + added + " · ↻" + updated + balTxt;
+        if (meta) meta.textContent = remote.length + " سواپ · +" + added + " · ↻" + updated + balTxt;
         toast(added ? (added + " سواپ جدید اضافه شد") : (updated ? "سواپ‌ها به‌روز شدند" : "همه سواپ‌ها قبلاً ثبت شده‌اند"));
       } catch (err) {
         console.error(err);
@@ -1559,7 +1562,7 @@
         else if (/HTTP 404/.test(msg)) human = "این آدرس در شبکه پیدا نشد";
         else if (/abort|AbortError|timeout/i.test(msg)) human = "زمان تمام شد — دوباره تلاش کن";
         else if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) human = "دسترسی شبکه/CORS — صفحه را با GitHub Pages یا یک سرور محلی باز کن (نه file://)";
-        meta.textContent = "خطا: " + human;
+        if (meta) meta.textContent = "خطا: " + human;
         toast(human + " (" + msg.slice(0, 80) + ")");
       } finally {
         syncing = false;
@@ -1841,6 +1844,9 @@
           pill.className = "pill " + (ch >= 0 ? "up" : "down");
           pill.textContent = (ch >= 0 ? "▲ " : "▼ ") + Math.abs(ch).toFixed(2) + "٪";
           pill.classList.remove("hidden");
+        } else {
+          pill.classList.add("hidden");
+          pill.textContent = "";
         }
       }
     }
@@ -2020,18 +2026,31 @@
     }
 
     function sendTelegram(text) {
-      const token = tg.token.trim(), chat = tg.chatId.trim();
+      const token = (tg.token || "").trim(), chat = (tg.chatId || "").trim();
       if (!token || !chat) return Promise.reject(new Error("توکن و Chat ID لازم است"));
       const url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(text);
-      return fetch(url).then((r) => r.json()).then((j) => {
-        if (!j.ok) throw new Error(j.description || "ارسال ناموفق");
-        return j;
-      }).catch(() => new Promise((resolve) => {
-        const img = new Image();
-        img.onload = img.onerror = () => resolve(true);
-        img.src = url;
-        setTimeout(() => resolve(true), 1500);
-      }));
+      return fetch(url)
+        .then(async (r) => {
+          let j = null;
+          try { j = await r.json(); } catch (_) {}
+          if (!r.ok || (j && j.ok === false)) {
+            const desc = (j && j.description) ? j.description : ("HTTP " + r.status);
+            throw new Error(desc || "ارسال ناموفق");
+          }
+          return j || true;
+        })
+        .catch((err) => {
+          const msg = String((err && err.message) || err || "");
+          if (/unauthorized|not found|chat not found|forbidden|bot token|HTTP [4-5]|ناموفق|لازم است/i.test(msg)) {
+            return Promise.reject(err instanceof Error ? err : new Error(msg));
+          }
+          return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = img.onerror = () => resolve(true);
+            img.src = url;
+            setTimeout(() => resolve(true), 1500);
+          });
+        });
     }
 
     /** Record price samples for momentum (keep ~2h at 45s interval) */
@@ -2444,11 +2463,16 @@
       }
       document.getElementById("livePrice").textContent = live != null ? fmt(live, 4) : "—";
       const pill = document.getElementById("chgPill");
-      if (quote && quote.change24h != null) {
-        const ch = quote.change24h;
-        pill.className = "pill " + (ch >= 0 ? "up" : "down");
-        pill.textContent = (ch >= 0 ? "▲ " : "▼ ") + Math.abs(ch).toFixed(2) + "٪";
-        pill.classList.remove("hidden");
+      if (pill) {
+        if (quote && quote.change24h != null) {
+          const ch = quote.change24h;
+          pill.className = "pill " + (ch >= 0 ? "up" : "down");
+          pill.textContent = (ch >= 0 ? "▲ " : "▼ ") + Math.abs(ch).toFixed(2) + "٪";
+          pill.classList.remove("hidden");
+        } else {
+          pill.classList.add("hidden");
+          pill.textContent = "";
+        }
       }
       if (quote) {
         let meta = quote.source + (quote.cached ? " · کش ۴۵ث" : "") + (quote.stale ? " · قدیمی" : "");
@@ -2515,6 +2539,7 @@
       }
 
       const hist = document.getElementById("history");
+      if (hist) {
       if (!trades.length) hist.innerHTML = '<div class="empty-state"><h3>هنوز سواپی نیست</h3><p>از دکمه «خواندن از کیف‌پول» استفاده کن تا سواپ‌ها از زنجیره بیایند.</p></div>';
       else hist.innerHTML = trades.slice().reverse().map((t, i, arr) => {
         const feeBits = [];
@@ -2547,6 +2572,7 @@
       hist.querySelectorAll("[data-id]").forEach((b) => b.onclick = () => ask("حذف معامله", "این معامله حذف شود؟", () => {
         trades = trades.filter((x) => x.id !== Number(b.dataset.id)); saveTrades(); render();
       }));
+      }
 
       try { drawChart(chartPts, s.avgBuyPrice || null); } catch (e) { console.error(e); }
       try { maybeAlert(s); } catch (e) { console.error(e); }
