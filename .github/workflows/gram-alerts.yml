@@ -1,20 +1,9 @@
 # GRAM / TON Telegram alerts — runs without the browser
 #
-# Setup (one-time):
-# 1. Put this repo on GitHub
-# 2. Settings → Secrets and variables → Actions → New repository secret:
-#      TELEGRAM_BOT_TOKEN   = token from @BotFather
-#      TELEGRAM_CHAT_ID     = your chat id (e.g. from @userinfobot)
-#    Optional secrets:
-#      WALLET_ADDRESS       = EQCw1-hJcfl_YlneBdXmw2OHNx9CO76r5fDrl4gCI4uaf7wR
-#      ALERT_ABOVE          = 1.60
-#      ALERT_BELOW          = 1.40
-#      ALERT_PROFIT_PCTS    = 5,10
-#      ALERT_LOSS_PCTS      = 5,10
-#      STARTING_CAPITAL     = 200
-# 3. Enable Actions on the repo
-#
-# Schedule: every 5 minutes (GitHub may delay a bit under load)
+# Secrets:
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (required)
+#   WALLET_ADDRESS, ALERT_ABOVE, ALERT_BELOW, ALERT_PROFIT_PCTS,
+#   ALERT_LOSS_PCTS, STARTING_CAPITAL (optional)
 
 name: GRAM Telegram Alerts
 
@@ -48,12 +37,13 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Restore alert cooldown state
+      - name: Restore alert state
         uses: actions/cache@v4
         with:
           path: .alert-state.json
-          key: alert-state-${{ github.repository }}
+          key: alert-state-v2-${{ github.repository }}
           restore-keys: |
+            alert-state-v2-
             alert-state-
 
       - name: Run alert check
@@ -70,9 +60,9 @@ jobs:
           STATE_PATH: .alert-state.json
         run: node scripts/ton-alert.mjs
 
-      - name: Persist alert cooldown state
+      - name: Save alert state
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .alert-state.json
-          key: alert-state-${{ github.repository }}-${{ github.run_id }}
+          key: alert-state-v2-${{ github.repository }}
