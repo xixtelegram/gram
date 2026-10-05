@@ -346,6 +346,45 @@ function buyIsWorthwhile(pos, price) {
   return true;
 }
 
+/** Full last-swap suggestion block (same idea as the app advice card) */
+function lastSwapAdviceBlock(pos, price) {
+  if (!pos || !pos.lastSwapPrice || !pos.lastSwapType) return "";
+  const ref = pos.lastSwapPrice;
+  const ROUND = 0.2;
+  const pad = 1 - ROUND / 100;
+  const levels = [0.5, 1, 1.5, 2, 3, 5];
+  let out = "\n\n💡 پیشنهاد بر اساس سواپ آخر";
+  if (pos.lastSwapType === "buy") {
+    const curPct = price ? ((price - ref) / ref) * 100 : null;
+    out += `\nآخرین سواپ: خرید GRAM @ ${fmt(ref)}`;
+    if (curPct != null) {
+      out += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? "سود " : "ضرر "}${Math.abs(curPct).toFixed(2)}٪ نسبت به خرید`;
+    }
+    if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی فروش را در نظر بگیری";
+    else out += "\nمنتظر رشد بالای اهداف فروش بمان";
+    out += "\nاهداف فروش:";
+    for (const pct of levels) {
+      const slip = pos.gram > 0 ? estSlippagePct(pos.gram) / 100 : 0;
+      const midNeed = (ref * (1 + pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+      out += `\n• +${pct}٪ → mid ≈ ${fmt(midNeed)}`;
+    }
+  } else {
+    const curPct = price ? ((ref - price) / ref) * 100 : null;
+    out += `\nآخرین سواپ: فروش GRAM @ ${fmt(ref)}`;
+    if (curPct != null) {
+      out += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? curPct.toFixed(2) + "٪ ارزان‌تر از فروش" : Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش"}`;
+    }
+    if (curPct != null && curPct >= MIN_ACTION_PCT) out += "\n✅ می‌توانی دوباره بخری";
+    else out += "\nمنتظر ریزش زیر اهداف خرید بمان";
+    out += "\nاهداف خرید:";
+    for (const pct of levels) {
+      const target = ref * (1 - pct / 100) * pad;
+      out += `\n• −${pct}٪ → زیر ${fmt(target)}`;
+    }
+  }
+  return out;
+}
+
 function stanceLine(stance, pos, price) {
   let line = "📍 " + stance.label;
   if (stance.mode === "hold_gram" && pos && pos.avg) {
@@ -364,6 +403,7 @@ function stanceLine(stance, pos, price) {
     }
     line += `\nموجودی USDT: ${fmt(pos.cash, 2)}`;
   }
+  line += lastSwapAdviceBlock(pos, price);
   return line;
 }
 
@@ -478,9 +518,13 @@ async function main() {
     }
   }
 
-  // Forced report
-  if (process.env.REPORT === "1") {
+  // Forced / manual report — always send status so user sees the bot works
+  const forceReport = process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch";
+  if (forceReport) {
     let msg = `📊 وضعیت GRAM\nقیمت: ${fmt(live)} USDT (${priceInfo.source})`;
+    if (priceInfo.dexUsd != null && priceInfo.cexUsd != null) {
+      msg += `\nDEX ${fmt(priceInfo.dexUsd)} · CEX ${fmt(priceInfo.cexUsd)}`;
+    }
     if (mom.dir === "up") msg += `\nروند کوتاه: صعودی (+${fmt(Math.abs(mom.delta))})`;
     else if (mom.dir === "down") msg += `\nروند کوتاه: نزولی (−${fmt(Math.abs(mom.delta))})`;
     else msg += `\nروند کوتاه: خنثی (نویز ~${noiseAbs(live).toFixed(4)})`;
@@ -489,18 +533,16 @@ async function main() {
       if (pos.gram > 0) msg += `\nموجودی: ${fmt(pos.gram, 4)} GRAM`;
       if (pos.cash > 0) msg += `\nUSDT: ${fmt(pos.cash, 2)}`;
       msg += `\nارزش کل: ${fmt(pos.equity, 2)}`;
-      if (START_CAP > 0) {
-        const p = (pos.totalPnl / START_CAP) * 100;
-        msg += `\nسود/زیان: ${pos.totalPnl >= 0 ? "+" : ""}${fmt(pos.totalPnl, 2)} (${p >= 0 ? "+" : ""}${p.toFixed(2)}٪)`;
-      }
+      if (pos.avg > 0) msg += `\nمیانگین ورود: ${fmt(pos.avg)}`;
     }
+    msg += `\n\n(اجرای ${process.env.EVENT_NAME || "manual/schedule"})`;
     msgs.push(msg);
   }
 
   saveState(mem);
 
   if (!msgs.length) {
-    console.log("No alerts to send");
+    console.log("No alerts to send (no threshold hit; scheduled run without REPORT)");
     return;
   }
 
