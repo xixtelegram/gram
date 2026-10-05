@@ -968,7 +968,23 @@
       if (!r0 || !r1) throw new Error("ston");
       // token0 USDT (6dec), token1 native TON (9dec)
       if (r1 > 0) poolTonReserve = r1 / 1e9;
-      return { usd: (r0 / 1e6) / (r1 / 1e9), change24h: null, source: "STON.fi DEX", dex: true };
+      const usd = (r0 / 1e6) / (r1 / 1e9);
+      if (!Number.isFinite(usd) || usd <= 0) throw new Error("ston bad price");
+      return { usd, change24h: null, source: "STON.fi DEX", dex: true };
+    }
+    async function fromTonapi() {
+      // Same host as wallet sync — usually works when STON/Kraken are blocked
+      const j = await fetchJson("https://tonapi.io/v2/rates?tokens=ton&currencies=usd", 7000);
+      const row = j.rates && j.rates.TON;
+      const usd = row && row.prices && Number(row.prices.USD);
+      if (!Number.isFinite(usd) || usd <= 0) throw new Error("tonapi rates");
+      let change = null;
+      const d = row.diff_24h && row.diff_24h.USD;
+      if (d != null) {
+        const n = parseFloat(String(d).replace(/[%＋+]/g, "").replace("−", "-").replace("–", "-"));
+        if (Number.isFinite(n)) change = n;
+      }
+      return { usd, change24h: change, source: "tonapi" };
     }
     async function fromLlama() {
       const j = await fetchJson("https://coins.llama.fi/prices/current/coingecko:the-open-network");
@@ -985,7 +1001,6 @@
 
     async function getPrice(force) {
       const now = Date.now();
-      // cache 45s — like the first version
       try {
         const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
         if (!force && cached && cached.q && cached.q.usd && now - cached.at < 45000) {
@@ -997,22 +1012,29 @@
         }
       } catch (_) {}
 
-      // Original simple path: DEX first, then one CEX — stop as soon as we have a price
-      let dex = null, cex = null;
+      // Fast sequential: DEX → tonapi → CEX (stop early when we have a usable primary)
+      let dex = null, ref = null;
       try { dex = await fromSton(); } catch (_) {}
       if (!dex) {
-        try { cex = await fromKraken(); } catch (_) {}
-      } else {
-        // optional CEX for comparison — don't block decision price
-        try { cex = await fromKraken(); } catch (_) {
-          try { cex = await fromCoinbase(); } catch (_) {}
+        try { ref = await fromTonapi(); } catch (_) {}
+      }
+      if (!dex && !ref) {
+        try { ref = await fromKraken(); } catch (_) {}
+      }
+      if (!dex && !ref) {
+        try { ref = await fromCoinbase(); } catch (_) {}
+      }
+      if (!dex && !ref) {
+        try { ref = await fromLlama(); } catch (_) {}
+      }
+      // Optional second source for spread/change when DEX worked
+      if (dex && !ref) {
+        try { ref = await fromTonapi(); } catch (_) {
+          try { ref = await fromKraken(); } catch (_) {}
         }
       }
-      if (!cex && !dex) {
-        try { cex = await fromCoinbase(); } catch (_) {}
-      }
 
-      if (!dex && !cex) {
+      if (!dex && !ref) {
         try {
           const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
           if (cached && cached.q && cached.q.usd) {
@@ -1024,12 +1046,12 @@
         throw new Error("no price");
       }
 
-      const primary = dex || cex;
+      const primary = dex || ref;
       dexPrice = dex ? dex.usd : null;
-      cexPrice = cex ? cex.usd : null;
+      cexPrice = ref ? ref.usd : null;
       quote = {
         usd: primary.usd,
-        change24h: cex && cex.change24h != null ? cex.change24h : null,
+        change24h: (ref && ref.change24h != null) ? ref.change24h : null,
         source: dex ? "STON.fi DEX" : primary.source,
         dexUsd: dexPrice,
         cexUsd: cexPrice,
@@ -1524,6 +1546,7 @@
         stat("هزینه پوزیشن باز", s.investedUsdt ? fmt(s.investedUsdt, 2) : "—", "USDT");
 
       const box = document.getElementById("targets");
+      if (box) {
       if (s.totalGram <= 0 || !s.avgBuyPrice) box.innerHTML = '<p class="empty">بعد از سواپ به GRAM، اهداف اینجا می‌آید</p>';
       else {
         const slip = estSlippagePct(s.totalGram) / 100;
@@ -1536,6 +1559,7 @@
           return '<button class="target" type="button" data-p="' + neededMid + '"><span class="profit" style="font-weight:800">+' + pct + '٪</span><span><b style="display:block;font-variant-numeric:tabular-nums">' + fmt(neededMid, 4) + ' mid</b><span class="muted">≈ ' + fmt(usdtOut, 2) + ' بعد از لغزش</span></span><span class="profit" style="font-weight:800">+' + fmt(net, 2) + "</span></button>";
         }).join("");
         box.querySelectorAll(".target").forEach((b) => b.onclick = () => runSim(Number(b.dataset.p)));
+      }
       }
 
       const hist = document.getElementById("history");
@@ -1568,8 +1592,8 @@
         trades = trades.filter((x) => x.id !== Number(b.dataset.id)); saveTrades(); render();
       }));
 
-      drawChart(chartPts, s.avgBuyPrice || null);
-      maybeAlert(s);
+      try { drawChart(chartPts, s.avgBuyPrice || null); } catch (e) { console.error(e); }
+      try { maybeAlert(s); } catch (e) { console.error(e); }
     }
 
     function runSim(price) {
@@ -1682,13 +1706,20 @@
       if (btn) btn.disabled = true;
       try {
         await getPrice(!!force);
-        render();
+        try { render(); }
+        catch (re) { console.error("render", re); }
       } catch (e) {
-        console.error(e);
+        console.error("price", e);
         const el = document.getElementById("livePrice");
         const meta = document.getElementById("priceMeta");
-        if (el) el.textContent = "—";
-        if (meta) meta.textContent = "خطا در اتصال · دوباره تلاش کن";
+        // keep last good price if we have it
+        if (live != null && Number.isFinite(live)) {
+          if (el) el.textContent = fmt(live, 4);
+          if (meta) meta.textContent = "آخرین قیمت ذخیره شد · اتصال تازه برقرار نشد";
+        } else {
+          if (el) el.textContent = "—";
+          if (meta) meta.textContent = "خطا در اتصال · دوباره تلاش کن";
+        }
       } finally {
         fetching = false;
         if (btn) btn.disabled = false;
