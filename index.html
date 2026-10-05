@@ -235,7 +235,7 @@
         <div class="sec-head">
           <div>
             <h2 class="sec-title"><span class="step">۲</span> قیمت الان</h2>
-            <p class="help">قیمت از استخر واقعی DEX خوانده می‌شود (نزدیک‌ترین قیمت به سواپ تو). قیمت صرافی فقط برای مقایسه است.</p>
+            <p class="help">قیمت به‌صورت خودکار هر ۱۵ ثانیه از بازار خوانده می‌شود. دکمه فقط برای تازه‌سازی فوری است.</p>
           </div>
         </div>
         <div class="price-row">
@@ -933,7 +933,7 @@
 
     async function fetchJson(url, ms) {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), ms || 6000);
+      const timer = setTimeout(() => ctrl.abort(), ms || 4000);
       try {
         const res = await fetch(url, { signal: ctrl.signal, headers: { accept: "application/json" } });
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -942,7 +942,7 @@
     }
 
     async function fromKraken() {
-      const j = await fetchJson("https://api.kraken.com/0/public/Ticker?pair=TONUSD", 7000);
+      const j = await fetchJson("https://api.kraken.com/0/public/Ticker?pair=TONUSD", 4000);
       const row = j.result && j.result.TONUSD;
       const last = Number(row && row.c && row.c[0]);
       const open = Number(row && row.o);
@@ -962,7 +962,7 @@
       return { usd, change24h: change, source: "Coinbase" };
     }
     async function fromSton() {
-      const j = await fetchJson("https://api.ston.fi/v1/pools/" + STON, 7000);
+      const j = await fetchJson("https://api.ston.fi/v1/pools/" + STON, 4000);
       const pool = j.pool || j;
       const r0 = Number(pool.reserve0), r1 = Number(pool.reserve1);
       if (!r0 || !r1) throw new Error("ston");
@@ -974,7 +974,7 @@
     }
     async function fromTonapi() {
       // Same host as wallet sync — usually works when STON/Kraken are blocked
-      const j = await fetchJson("https://tonapi.io/v2/rates?tokens=ton&currencies=usd", 7000);
+      const j = await fetchJson("https://tonapi.io/v2/rates?tokens=ton&currencies=usd", 4000);
       const row = j.rates && j.rates.TON;
       const usd = row && row.prices && Number(row.prices.USD);
       if (!Number.isFinite(usd) || usd <= 0) throw new Error("tonapi rates");
@@ -999,68 +999,119 @@
       return { usd: row.usd, change24h: row.usd_24h_change ?? null, source: "CoinGecko" };
     }
 
+
+    function applyQuote(q, opts) {
+      opts = opts || {};
+      quote = Object.assign({}, q, {
+        cached: !!opts.cached,
+        stale: !!opts.stale
+      });
+      live = quote.usd;
+      if (quote.dexUsd != null) dexPrice = quote.dexUsd;
+      if (quote.cexUsd != null) cexPrice = quote.cexUsd;
+      try { pushPriceSample(live); } catch (_) {}
+      try {
+        localStorage.setItem(PKEY, JSON.stringify({ at: Date.now(), q: {
+          usd: quote.usd,
+          change24h: quote.change24h,
+          source: quote.source,
+          dexUsd: quote.dexUsd,
+          cexUsd: quote.cexUsd
+        }}));
+      } catch (_) {}
+    }
+
     async function getPrice(force) {
       const now = Date.now();
+      // Serve cache instantly (even on force we show it first, then refresh)
       try {
         const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
-        if (!force && cached && cached.q && cached.q.usd && now - cached.at < 45000) {
-          quote = Object.assign({}, cached.q, { cached: true, stale: false });
-          live = quote.usd;
-          if (quote.dexUsd != null) dexPrice = quote.dexUsd;
-          if (quote.cexUsd != null) cexPrice = quote.cexUsd;
-          return quote;
+        if (cached && cached.q && cached.q.usd && now - cached.at < 120000) {
+          applyQuote(cached.q, { cached: true, stale: now - cached.at > 45000 });
+          if (!force && now - cached.at < 15000) return quote; // fresh enough
         }
       } catch (_) {}
 
-      // Fast sequential: DEX → tonapi → CEX (stop early when we have a usable primary)
-      let dex = null, ref = null;
-      try { dex = await fromSton(); } catch (_) {}
-      if (!dex) {
-        try { ref = await fromTonapi(); } catch (_) {}
-      }
-      if (!dex && !ref) {
-        try { ref = await fromKraken(); } catch (_) {}
-      }
-      if (!dex && !ref) {
-        try { ref = await fromCoinbase(); } catch (_) {}
-      }
-      if (!dex && !ref) {
-        try { ref = await fromLlama(); } catch (_) {}
-      }
-      // Optional second source for spread/change when DEX worked
-      if (dex && !ref) {
-        try { ref = await fromTonapi(); } catch (_) {
-          try { ref = await fromKraken(); } catch (_) {}
+      // Race the two fastest sources — first valid wins UI
+      const sources = [
+        fromSton,
+        fromTonapi,
+        fromKraken,
+        fromCoinbase
+      ];
+
+      let primary = null;
+      let errors = [];
+      // parallel race: first success
+      primary = await new Promise((resolve) => {
+        let done = false;
+        let pending = sources.length;
+        sources.forEach((fn) => {
+          fn().then((r) => {
+            if (!done && r && r.usd > 0) {
+              done = true;
+              resolve(r);
+            }
+          }).catch((e) => {
+            errors.push(String(e && e.message || e));
+          }).finally(() => {
+            pending -= 1;
+            if (!done && pending === 0) resolve(null);
+          });
+        });
+      });
+
+      if (!primary) {
+        if (live != null && Number.isFinite(live)) {
+          // keep existing
+          return quote;
         }
+        throw new Error("no price: " + errors.slice(0, 2).join("; "));
       }
 
-      if (!dex && !ref) {
+      const isDex = !!primary.dex || (primary.source && String(primary.source).indexOf("STON") >= 0);
+      applyQuote({
+        usd: primary.usd,
+        change24h: primary.change24h != null ? primary.change24h : (quote && quote.change24h),
+        source: primary.source,
+        dexUsd: isDex ? primary.usd : null,
+        cexUsd: !isDex ? primary.usd : (quote && quote.cexUsd)
+      });
+
+      // Background: enrich with the other type (DEX/CEX) without blocking UI
+      (async () => {
         try {
-          const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
-          if (cached && cached.q && cached.q.usd) {
-            quote = Object.assign({}, cached.q, { cached: true, stale: true });
-            live = quote.usd;
-            return quote;
+          if (isDex) {
+            let ref = null;
+            try { ref = await fromTonapi(); } catch (_) {
+              try { ref = await fromKraken(); } catch (_) {}
+            }
+            if (ref && ref.usd) {
+              quote.cexUsd = ref.usd;
+              cexPrice = ref.usd;
+              if (ref.change24h != null) quote.change24h = ref.change24h;
+              try { localStorage.setItem(PKEY, JSON.stringify({ at: Date.now(), q: quote })); } catch (_) {}
+              try { render(); } catch (_) {}
+            }
+          } else {
+            try {
+              const dex = await fromSton();
+              if (dex && dex.usd) {
+                // Prefer DEX mid for trading once available
+                applyQuote({
+                  usd: dex.usd,
+                  change24h: quote.change24h,
+                  source: dex.source,
+                  dexUsd: dex.usd,
+                  cexUsd: primary.usd
+                });
+                try { render(); } catch (_) {}
+              }
+            } catch (_) {}
           }
         } catch (_) {}
-        throw new Error("no price");
-      }
+      })();
 
-      const primary = dex || ref;
-      dexPrice = dex ? dex.usd : null;
-      cexPrice = ref ? ref.usd : null;
-      quote = {
-        usd: primary.usd,
-        change24h: (ref && ref.change24h != null) ? ref.change24h : null,
-        source: dex ? "STON.fi DEX" : primary.source,
-        dexUsd: dexPrice,
-        cexUsd: cexPrice,
-        cached: false,
-        stale: false
-      };
-      live = quote.usd;
-      try { localStorage.setItem(PKEY, JSON.stringify({ at: now, q: quote })); } catch (_) {}
-      try { pushPriceSample(live); } catch (_) {}
       return quote;
     }
 
@@ -1700,25 +1751,23 @@
     }
 
     async function refreshPrice(force) {
-      if (fetching) return;
+      if (fetching && !force) return;
       fetching = true;
       const btn = document.getElementById("btnPrice");
       if (btn) btn.disabled = true;
       try {
         await getPrice(!!force);
-        try { render(); }
-        catch (re) { console.error("render", re); }
+        try { render(); } catch (re) { console.error(re); }
       } catch (e) {
         console.error("price", e);
         const el = document.getElementById("livePrice");
         const meta = document.getElementById("priceMeta");
-        // keep last good price if we have it
-        if (live != null && Number.isFinite(live)) {
+        if (live != null && Number.isFinite(Number(live))) {
           if (el) el.textContent = fmt(live, 4);
-          if (meta) meta.textContent = "آخرین قیمت ذخیره شد · اتصال تازه برقرار نشد";
+          if (meta) meta.textContent = "آفلاین · آخرین قیمت";
         } else {
           if (el) el.textContent = "—";
-          if (meta) meta.textContent = "خطا در اتصال · دوباره تلاش کن";
+          if (meta) meta.textContent = "در حال اتصال…";
         }
       } finally {
         fetching = false;
@@ -1801,11 +1850,20 @@
     document.getElementById("tDate").value = now.toISOString().slice(0, 16);
     document.getElementById("walletAddr").value = walletAddr || "";
     bindTg();
+    // Show cached price instantly if any
+    try {
+      const cached = JSON.parse(localStorage.getItem(PKEY) || "null");
+      if (cached && cached.q && cached.q.usd) {
+        quote = Object.assign({}, cached.q, { cached: true, stale: false });
+        live = quote.usd;
+      }
+    } catch (_) {}
     render();
-    refreshPrice(false);
-    setTimeout(() => { refreshChart(); }, 500);
-    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 1500);
-    setInterval(() => refreshPrice(false), 45000);
+    // Live price right away (auto — no button needed)
+    refreshPrice(true);
+    setTimeout(() => { refreshChart(); }, 800);
+    setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 2000);
+    setInterval(() => refreshPrice(false), 15000);
     // auto re-sync wallet every 10 minutes
     setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
     setInterval(async () => {
