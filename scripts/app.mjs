@@ -810,8 +810,20 @@ function drawChart(pts, avg) {
 function sendTelegram(text) {
   const token = (tg.token || "").trim(), chat = (tg.chatId || "").trim();
   if (!token || !chat) return Promise.reject(new Error("توکن و Chat ID لازم است"));
-  const url = "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(text);
-  return fetch(url)
+  const bodyText = String(text == null ? "" : text).slice(0, 4096);
+  if (!bodyText) return Promise.reject(new Error("پیام خالی است"));
+  const api = "https://api.telegram.org/bot" + token + "/sendMessage";
+  const form = new URLSearchParams();
+  form.set("chat_id", chat);
+  form.set("text", bodyText);
+  const formBody = form.toString();
+
+  // POST avoids URL length limits and keeps token out of the query string
+  return fetch(api, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: formBody,
+  })
     .then(async (r) => {
       let j = null;
       try { j = await r.json(); } catch (_) {}
@@ -823,15 +835,31 @@ function sendTelegram(text) {
     })
     .catch((err) => {
       const msg = String((err && err.message) || err || "");
-      if (/unauthorized|not found|chat not found|forbidden|bot token|HTTP [4-5]|ناموفق|لازم است/i.test(msg)) {
+      // Real API / auth errors we could read — surface them
+      if (/unauthorized|not found|chat not found|forbidden|bot token|HTTP [4-5]|ناموفق|لازم است|too long|message is too long/i.test(msg)) {
         return Promise.reject(err instanceof Error ? err : new Error(msg));
       }
-      return new Promise((resolve) => {
-        const img = new Image();
-        img.onload = img.onerror = () => resolve(true);
-        img.src = url;
-        setTimeout(() => resolve(true), 1500);
-      });
+      // Likely CORS (browser cannot read api.telegram.org). Fire-and-forget still delivers.
+      try {
+        if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+          if (navigator.sendBeacon(api, new Blob([formBody], { type: "application/x-www-form-urlencoded" }))) {
+            return true;
+          }
+        }
+      } catch (_) {}
+      // Short-message GET fallback: Telegram processes the request even if response is unreadable
+      if (bodyText.length <= 1500) {
+        const getUrl = api + "?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(bodyText);
+        return new Promise((resolve) => {
+          const img = new Image();
+          let done = false;
+          const finish = () => { if (!done) { done = true; resolve(true); } };
+          img.onload = img.onerror = finish;
+          img.src = getUrl;
+          setTimeout(finish, 2000);
+        });
+      }
+      return Promise.reject(err instanceof Error ? err : new Error(msg || "ارسال ناموفق"));
     });
 }
 
@@ -969,26 +997,38 @@ function maybeAlert(state) {
   const recently = (k, c) => mem[k] && now - mem[k] < (c || cool);
   // Global gap: at most one Telegram message every ALERT_GLOBAL_GAP_MS
   if (mem._lastAny && now - mem._lastAny < ALERT_GLOBAL_GAP_MS) return false;
+  if (maybeAlert._inFlight) return false;
   const mark = (k) => {
     mem[k] = now;
     mem._lastAny = now;
-    localStorage.setItem(MEMKEY, JSON.stringify(mem));
+    try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
   };
-  const sendOne = (msg, okToast) => {
+  /** Soft-lock gap while request is in flight; full key mark only after success */
+  const sendOne = (key, msg, okToast) => {
+    maybeAlert._inFlight = true;
+    mem._lastAny = now;
+    try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
     sendTelegram(msg)
-      .then(() => { if (okToast) toast(okToast); })
-      .catch(() => toast("هشدار ارسال نشد"));
+      .then(() => {
+        mark(key);
+        if (okToast) toast(okToast);
+      })
+      .catch(() => {
+        // Undo soft gap so a real failure can retry on the next price tick
+        if (mem._lastAny === now) delete mem._lastAny;
+        try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
+        toast("هشدار ارسال نشد");
+      })
+      .finally(() => { maybeAlert._inFlight = false; });
     return true;
   };
 
   // Priority 1: fixed ceiling / floor
   if (above > 0 && live >= above && !recently("above")) {
-    mark("above");
-    return sendOne(msgCeiling(above, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
+    return sendOne("above", msgCeiling(above, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
   }
   if (below > 0 && live <= below && !recently("below")) {
-    mark("below");
-    return sendOne(msgFloor(below, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
+    return sendOne("below", msgFloor(below, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
   }
 
   // Priority 2: vs last swap (one message only)
@@ -1000,30 +1040,26 @@ function maybeAlert(state) {
       for (const targetPct of profitPcts) {
         const key = "ls_profit_buy_" + targetPct;
         if (movePct >= targetPct && !recently(key)) {
-          mark(key);
-          return sendOne(msgProfitBuy(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار سود ارسال شد");
+          return sendOne(key, msgProfitBuy(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار سود ارسال شد");
         }
       }
       for (const lossPct of lossPcts) {
         const key = "ls_loss_buy_" + lossPct;
         if (movePct <= -lossPct && !recently(key)) {
-          mark(key);
-          return sendOne(msgLossBuy(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار ضرر ارسال شد");
+          return sendOne(key, msgLossBuy(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار ضرر ارسال شد");
         }
       }
     } else if (lt.type === "sell") {
       for (const targetPct of profitPcts) {
         const key = "ls_profit_sell_" + targetPct;
         if (movePct <= -targetPct && !recently(key)) {
-          mark(key);
-          return sendOne(msgProfitSell(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار فرصت خرید");
+          return sendOne(key, msgProfitSell(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار فرصت خرید");
         }
       }
       for (const lossPct of lossPcts) {
         const key = "ls_loss_sell_" + lossPct;
         if (movePct >= lossPct && !recently(key)) {
-          mark(key);
-          return sendOne(msgLossSell(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار رشد بعد از فروش");
+          return sendOne(key, msgLossSell(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار رشد بعد از فروش");
         }
       }
     }
@@ -1032,24 +1068,21 @@ function maybeAlert(state) {
   // Priority 3: momentum (lowest)
   if (mom.dir === "up" && stance.action === "sell" && !recently("mom_up_sell", coolMom)) {
     if (sellIsWorthwhile(state, live)) {
-      mark("mom_up_sell");
-      return sendOne(msgTrendUp(mom.from, live, mom.delta, stanceLine(stance, state, live)), "هشدار روند صعودی");
+      return sendOne("mom_up_sell", msgTrendUp(mom.from, live, mom.delta, stanceLine(stance, state, live)), "هشدار روند صعودی");
     }
   }
   if (mom.dir === "down" && stance.action === "sell" && !recently("mom_down_sell", coolMom)) {
     const drop = Math.abs(mom.delta);
     const nAbs = mom.noise || noiseAbs(live);
     if (drop >= nAbs) {
-      mark("mom_down_sell");
-      return sendOne(msgTrendDown(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار روند نزولی");
+      return sendOne("mom_down_sell", msgTrendDown(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار روند نزولی");
     }
   }
   if (mom.dir === "down" && stance.action === "buy" && !recently("mom_down_buy", coolMom)) {
     const drop = Math.abs(mom.delta);
     const nAbs = mom.noise || noiseAbs(live);
     if (drop >= nAbs && buyIsWorthwhile(state, live)) {
-      mark("mom_down_buy");
-      return sendOne(msgDrop(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار فرصت خرید");
+      return sendOne("mom_down_buy", msgDrop(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار فرصت خرید");
     }
   }
   if (mom.dir === "up" && stance.action === "buy" && !recently("mom_up_buy", coolMom)) {
@@ -1058,8 +1091,7 @@ function maybeAlert(state) {
       const ref = (state.lastSwapType === "sell" && state.lastSwapPrice) ? state.lastSwapPrice : null;
       const chasing = ref != null && live > ref + nAbs;
       if (!chasing) {
-        mark("mom_up_buy");
-        return sendOne(msgBounce(mom.delta, live, stanceLine(stance, state, live)), "هشدار خرید روی برگشت");
+        return sendOne("mom_up_buy", msgBounce(mom.delta, live, stanceLine(stance, state, live)), "هشدار خرید روی برگشت");
       }
     }
   }
