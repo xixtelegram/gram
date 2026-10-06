@@ -4,6 +4,8 @@
 import {
   stanceLine as tgStanceLine,
   buildStatusMessage as tgBuildStatus,
+  buildAdvice as tgBuildAdvice,
+  stanceOf,
   msgCeiling,
   msgFloor,
   msgProfitBuy,
@@ -15,6 +17,7 @@ import {
   msgDumpWatch,
   msgReversalBuy,
   msgConnected,
+  reconcileNote,
 } from "./telegram-messages.mjs";
 
 // ROUND = safety margin on advice only (not P&L)
@@ -471,69 +474,9 @@ function lastTrade() {
   return trades.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id)[0];
 }
 
-/**
- * Suggestion card based on last swap.
- * buy last → show sell targets (+pct from last price)
- * sell last → show buy targets (−pct from last price)
- */
+/** UI advice card — text only from telegram-messages.buildAdvice */
 function nextAdvice(s, price) {
-  const lt = lastTrade();
-  const pad = 1 - ROUND / 100;
-  if (!lt || !(lt.price > 0)) {
-    return { breakEven: null, suggest: null, hint: "هنوز سواپی ثبت نشده — همگام‌سازی کیف‌پول را بزن", meta: "", rows: [] };
-  }
-  const ref = lt.price;
-  const rows = [];
-
-  if (lt.type === "buy") {
-    // Holding GRAM after buy — when to sell
-    const curPct = price > 0 ? ((price - ref) / ref) * 100 : null;
-    const exec = (price > 0 && s.totalGram > 0) ? estExecSellPrice(price, s.totalGram) : null;
-    const execPct = exec != null ? ((exec - ref) / ref) * 100 : null;
-    let hint = "آخرین سواپ: خرید GRAM @ " + fmt(ref, 4);
-    if (curPct != null) {
-      hint += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? "سود " : "ضرر ") + Math.abs(curPct).toFixed(2) + "٪ نسبت به خرید";
-    }
-    if (execPct != null) {
-      hint += "\nبا لغزش تخمینی: " + fmt(exec, 4) + " (" + (execPct >= 0 ? "+" : "") + execPct.toFixed(2) + "٪)";
-    }
-    const levels = [0.5, 1, 1.5, 2, 3, 5];
-    for (const pct of levels) {
-      const midNeed = ref * (1 + pct / 100) / pad;
-      const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram) / 100 : 0;
-      const midForExec = ref * (1 + pct / 100) / Math.max(0.5, 1 - slip);
-      rows.push({
-        label: "فروش +" + pct + "٪",
-        price: midForExec,
-        detail: "هدف mid ≈ " + fmt(midForExec, 4) + " تا بعد از لغزش حدود +" + pct + "٪ بماند"
-      });
-    }
-    const suggest = (execPct != null && execPct >= MIN_ACTION_PCT) ? "to_usdt" : null;
-    if (suggest) hint += "\n✅ بعد از لغزش در سود معنادار هستی — می‌توانی بفروشی";
-    else if (curPct != null && curPct < 0) hint += "\nمنتظر برگشت بالای " + fmt(ref, 4) + " بمان";
-    return { breakEven: ref / pad, beExact: ref, suggest, hint, meta: "مرجع = قیمت سواپ آخر (خرید)", rows, lastType: "buy", ref };
-  }
-
-  // last was sell — holding USDT, when to buy back
-  const curPct = price > 0 ? ((ref - price) / ref) * 100 : null; // positive = cheaper than sell
-  const execBuy = (price > 0 && s.cashUsdt > 0) ? estExecBuyPrice(price, s.cashUsdt) : null;
-  let hint = "آخرین سواپ: فروش GRAM @ " + fmt(ref, 4);
-  if (curPct != null) {
-    hint += "\nالان mid: " + fmt(price, 4) + " → " + (curPct >= 0 ? (curPct.toFixed(2) + "٪ ارزان‌تر از فروش") : (Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش"));
-  }
-  const levels = [0.5, 1, 1.5, 2, 3, 5];
-  for (const pct of levels) {
-    const target = ref * (1 - pct / 100) * pad;
-    rows.push({
-      label: "خرید −" + pct + "٪",
-      price: target,
-      detail: "زیر " + fmt(target, 4) + " نسبت به فروش آخر حدود +" + pct + "٪ جا برای سود دور بعد"
-    });
-  }
-  const suggest = (curPct != null && curPct >= MIN_ACTION_PCT) ? "to_gram" : null;
-  if (suggest) hint += "\n✅ نسبت به فروش آخر ارزان‌تر شده — می‌توانی دوباره بخری";
-  else hint += "\nمنتظر ریزش زیر اهداف خرید بمان";
-  return { breakEven: ref * pad, beExact: ref, suggest, hint, meta: "مرجع = قیمت سواپ آخر (فروش)", rows, lastType: "sell", ref };
+  return tgBuildAdvice(s, price, lastTrade(), poolTonReserve);
 }
 
 async function fetchJson(url, ms) {
@@ -928,19 +871,9 @@ function detectMomentum(series) {
   };
 }
 
-/** Position from real balances + live price (not only last swap) */
+/** Position from balances + live price — labels from telegram-messages.stanceOf */
 function positionStance(s) {
-  const hasGram = s.totalGram > 1e-6;
-  const hasUsdt = s.cashUsdt > 1e-6;
-  if (hasGram && !hasUsdt) return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
-  if (hasUsdt && !hasGram) return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
-  if (hasGram && hasUsdt) {
-    const px = (live > 0 ? live : null) || s.avgBuyPrice || 0;
-    const gVal = s.totalGram * px;
-    if (gVal >= s.cashUsdt) return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
-    return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
-  }
-  return { mode: "empty", label: "پوزیشن مشخصی نیست", action: null };
+  return stanceOf(s, live);
 }
 
 /** True if a sell at live would be meaningfully above break-even (not just noise) */
@@ -1209,18 +1142,11 @@ function render() {
   const balLine = document.getElementById("walletBalLine");
   if (balLine) {
     if (walletBal) {
-      let txt = "✓ موجودی کیف‌پول: " + fmt(walletBal.ton, 4) + " GRAM · " + fmt(walletBal.usdt, 2) + " USDT";
-      if (s.bookGram != null) {
-        const d = Math.abs(s.bookGram - walletBal.ton);
-        if (d > 0.5) {
-          txt += " · ⚠️ دفتر سواپ‌ها " + fmt(s.bookGram, 4) + " GRAM (اختلاف " + fmt(d, 4) + " — واریز/برداشت غیرسواپ یا تاریخچه ناقص)";
-        } else {
-          txt += " · دفتر سواپ با زنجیره هم‌خوان";
-        }
-      }
-      balLine.textContent = txt;
+      balLine.textContent =
+        "✓ موجودی کیف‌پول: " + fmt(walletBal.ton, 4) + " GRAM · " + fmt(walletBal.usdt, 2) + " USDT · " +
+        reconcileNote(s);
     } else {
-      balLine.textContent = "همگام‌سازی کن تا موجودی دقیق از کیف‌پول خوانده شود";
+      balLine.textContent = reconcileNote(s);
     }
   }
 
