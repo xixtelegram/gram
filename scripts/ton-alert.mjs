@@ -1,10 +1,17 @@
 /**
- * GRAM Telegram alerts for GitHub Actions.
+ * GRAM Telegram alerts for GitHub Actions / any always-on runner.
  * Shared logic: ./gram-core.mjs + ./telegram-messages.mjs
  *
- * Required secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WALLET_ADDRESS
- * Optional: ALERT_ABOVE, ALERT_BELOW, ALERT_PROFIT_PCTS, ALERT_LOSS_PCTS
- * REPORT=1 or workflow_dispatch → status report (text + chart image)
+ * Required secrets/env:
+ *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WALLET_ADDRESS
+ *
+ * Optional env:
+ *   ALERT_ABOVE, ALERT_BELOW          — absolute price ceiling / floor
+ *   ALERT_PROFIT_PCTS, ALERT_LOSS_PCTS — comma lists e.g. "0.5,1,2,3"
+ *   REPORT=1                          — force full status + chart this run
+ *   REPORT_EVERY_HOURS=6              — periodic status when PC is off (default 0=off)
+ *   STATE_PATH                        — default .alert-state.json
+ *   EVENT_NAME                        — set by workflow (schedule | workflow_dispatch)
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import {
@@ -28,10 +35,10 @@ import {
   msgLossBuy,
   msgProfitSell,
   msgLossSell,
-  msgTrendUp,
-  msgTrendDown,
-  msgDrop,
-  msgBounce,
+  msgRallyPrepare,
+  msgReversalSell,
+  msgDumpWatch,
+  msgReversalBuy,
   statusChartUrl,
 } from "./telegram-messages.mjs";
 
@@ -43,8 +50,10 @@ const ALERT_BELOW = num(process.env.ALERT_BELOW);
 const PROFIT_PCTS = listNums(process.env.ALERT_PROFIT_PCTS);
 const LOSS_PCTS = listNums(process.env.ALERT_LOSS_PCTS);
 const STATE_PATH = process.env.STATE_PATH || ".alert-state.json";
+const REPORT_EVERY_HOURS = num(process.env.REPORT_EVERY_HOURS) || 0;
 const COOLDOWN_MS = 20 * 60 * 1000;
 const COOL_MOM_MS = 12 * 60 * 1000;
+const FETCH_RETRIES = 3;
 
 function listNums(v) {
   if (!v) return [];
@@ -56,15 +65,23 @@ function listNums(v) {
 }
 
 async function fetchJson(url, ms = 15000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
-    return await res.json();
-  } finally {
-    clearTimeout(t);
+  let lastErr;
+  for (let attempt = 1; attempt <= FETCH_RETRIES; attempt++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, headers: { accept: "application/json" } });
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      console.warn(`fetch attempt ${attempt}/${FETCH_RETRIES} failed:`, e.message || e);
+      if (attempt < FETCH_RETRIES) await new Promise((r) => setTimeout(r, 800 * attempt));
+    } finally {
+      clearTimeout(t);
+    }
   }
+  throw lastErr || new Error("fetch failed");
 }
 
 let poolTonReserve = 1.7e6;
@@ -252,106 +269,138 @@ async function main() {
   const mem = loadState();
   const series = pushSample(mem, live);
   const mom = detectMomentum(series);
-  const stance = positionStance(pos);
+  const stance = positionStance(pos, live);
   const lt = lastTradeFromPos(pos);
   const quote = { source: priceInfo.source, dexUsd: priceInfo.dexUsd, cexUsd: priceInfo.cexUsd };
-  /** @type {{text:string, photo?:boolean, key?:string}[]} */
+  /** @type {{text:string, photo?:boolean, key?:string, urgent?:boolean}[]} */
   const msgs = [];
+  const st = () => stanceText(pos, live);
+  const nAbs = mom.noise || noiseAbs(live);
+  const movePct = mom.movePct != null ? mom.movePct : (mom.from > 0 ? ((live - mom.from) / mom.from) * 100 : 0);
+  const COOL_REV_MS = 8 * 60 * 1000;
+  const COOL_PHASE_MS = 18 * 60 * 1000;
 
-  // Collect candidates first — mark only after a successful send
+  console.log(`Stance=${stance.mode}/${stance.action} phase=${mom.phase} dir=${mom.dir} movePct=${movePct.toFixed(2)}`);
+
+  // Priority 0: برگشت روند فوری (وابسته به پوزیشن)
+  if (stance.action === "sell" && mom.phase === "reversal_down" && !recently(mem, "phase_rev_sell", COOL_REV_MS)) {
+    if (Math.abs(mom.delta) >= nAbs) {
+      msgs.push({
+        key: "phase_rev_sell",
+        urgent: true,
+        text: msgReversalSell(mom.from, live, Math.abs(mom.delta), Math.abs(movePct), st()),
+      });
+    }
+  }
+  if (stance.action === "buy" && mom.phase === "reversal_up" && !recently(mem, "phase_rev_buy", COOL_REV_MS)) {
+    if (Math.abs(mom.delta) >= nAbs) {
+      msgs.push({
+        key: "phase_rev_buy",
+        urgent: true,
+        text: msgReversalBuy(mom.from, live, Math.abs(movePct), st()),
+      });
+    }
+  }
+
+  // Priority 1: سقف / کف
   if (ALERT_ABOVE != null && live >= ALERT_ABOVE && !recently(mem, "above")) {
-    msgs.push({ key: "above", text: msgCeiling(ALERT_ABOVE, live, stanceText(pos, live)) });
+    msgs.push({ key: "above", text: msgCeiling(ALERT_ABOVE, live, st()) });
   }
   if (ALERT_BELOW != null && live <= ALERT_BELOW && !recently(mem, "below")) {
-    msgs.push({ key: "below", text: msgFloor(ALERT_BELOW, live, stanceText(pos, live)) });
+    msgs.push({ key: "below", text: msgFloor(ALERT_BELOW, live, st()) });
   }
 
+  // Priority 2: درصد نسبت به آخرین سواپ — فقط هم‌جهت با پوزیشن
   if (lt && lt.price > 0) {
     const ref = lt.price;
-    const movePct = ((live - ref) / ref) * 100;
-    if (lt.type === "buy") {
+    const vsSwap = ((live - ref) / ref) * 100;
+    if (stance.action === "sell" && lt.type === "buy") {
       for (const target of PROFIT_PCTS) {
         const key = "ls_profit_buy_" + target;
-        if (movePct >= target && !recently(mem, key)) {
-          msgs.push({ key, text: msgProfitBuy(movePct, target, ref, live, stanceText(pos, live)) });
+        if (vsSwap >= target && !recently(mem, key)) {
+          msgs.push({ key, text: msgProfitBuy(vsSwap, target, ref, live, st()) });
           break;
         }
       }
       for (const loss of LOSS_PCTS) {
         const key = "ls_loss_buy_" + loss;
-        if (movePct <= -loss && !recently(mem, key)) {
-          msgs.push({ key, text: msgLossBuy(movePct, loss, ref, live, stanceText(pos, live)) });
+        if (vsSwap <= -loss && !recently(mem, key)) {
+          msgs.push({ key, text: msgLossBuy(vsSwap, loss, ref, live, st()) });
           break;
         }
       }
-    } else if (lt.type === "sell") {
+    }
+    if (stance.action === "buy" && lt.type === "sell") {
       for (const target of PROFIT_PCTS) {
         const key = "ls_profit_sell_" + target;
-        if (movePct <= -target && !recently(mem, key)) {
-          msgs.push({ key, text: msgProfitSell(movePct, target, ref, live, stanceText(pos, live)) });
+        if (vsSwap <= -target && !recently(mem, key)) {
+          msgs.push({ key, text: msgProfitSell(vsSwap, target, ref, live, st()) });
           break;
         }
       }
       for (const loss of LOSS_PCTS) {
         const key = "ls_loss_sell_" + loss;
-        if (movePct >= loss && !recently(mem, key)) {
-          msgs.push({ key, text: msgLossSell(movePct, loss, ref, live, stanceText(pos, live)) });
+        if (vsSwap >= loss && !recently(mem, key)) {
+          msgs.push({ key, text: msgLossSell(vsSwap, loss, ref, live, st()) });
           break;
         }
       }
     }
   }
 
-  if (mom.dir === "up" && stance.action === "sell" && !recently(mem, "mom_up_sell", COOL_MOM_MS)) {
-    if (sellIsWorthwhile(pos, live, poolTonReserve)) {
-      msgs.push({ key: "mom_up_sell", text: msgTrendUp(mom.from, live, mom.delta, stanceText(pos, live)) });
+  // Priority 3: ادامه روند — آماده‌باش
+  if (stance.action === "sell" && mom.phase === "rally" && !recently(mem, "phase_rally", COOL_PHASE_MS)) {
+    if (Math.abs(mom.delta) >= nAbs || (mom.strength || 0) >= 0.6) {
+      msgs.push({ key: "phase_rally", text: msgRallyPrepare(mom.from, live, Math.abs(movePct), st()) });
     }
   }
-  if (mom.dir === "down" && stance.action === "sell" && !recently(mem, "mom_down_sell", COOL_MOM_MS)) {
-    const drop = Math.abs(mom.delta);
-    if (drop >= (mom.noise || noiseAbs(live))) {
-      msgs.push({ key: "mom_down_sell", text: msgTrendDown(mom.from, live, drop, stanceText(pos, live)) });
-    }
-  }
-  if (mom.dir === "down" && stance.action === "buy" && !recently(mem, "mom_down_buy", COOL_MOM_MS)) {
-    const drop = Math.abs(mom.delta);
-    if (drop >= (mom.noise || noiseAbs(live)) && buyIsWorthwhile(pos, live, poolTonReserve)) {
-      msgs.push({ key: "mom_down_buy", text: msgDrop(mom.from, live, drop, stanceText(pos, live)) });
-    }
-  }
-  if (mom.dir === "up" && stance.action === "buy" && !recently(mem, "mom_up_buy", COOL_MOM_MS)) {
-    const ref = pos.lastSwapType === "sell" ? pos.lastSwapPrice : null;
-    const chasing = ref != null && live > ref + (mom.noise || noiseAbs(live));
-    if (!chasing && (buyIsWorthwhile(pos, live, poolTonReserve) || Math.abs(mom.delta) >= (mom.noise || noiseAbs(live)))) {
-      msgs.push({ key: "mom_up_buy", text: msgBounce(mom.delta, live, stanceText(pos, live)) });
+  if (stance.action === "buy" && mom.phase === "dump" && !recently(mem, "phase_dump", COOL_PHASE_MS)) {
+    if (Math.abs(mom.delta) >= nAbs || (mom.strength || 0) >= 0.6) {
+      msgs.push({ key: "phase_dump", text: msgDumpWatch(mom.from, live, Math.abs(movePct), st()) });
     }
   }
 
-  const forceReport = process.env.REPORT === "1" || process.env.EVENT_NAME === "workflow_dispatch";
-  if (forceReport) {
+  // Force report (manual) or periodic status while PC is offline
+  const forceReport = process.env.REPORT === "1";
+  const reportEveryMs = REPORT_EVERY_HOURS > 0 ? REPORT_EVERY_HOURS * 60 * 60 * 1000 : 0;
+  const lastReportAt = (mem.marks && mem.marks._lastReport) || 0;
+  const duePeriodic =
+    reportEveryMs > 0 && Date.now() - lastReportAt >= reportEveryMs;
+
+  if (forceReport || duePeriodic) {
     const status = buildStatusMessage(pos, live, quote, lt, checks(), poolTonReserve);
-    msgs.push({ text: status, photo: true });
+    msgs.push({ key: "_lastReport", text: status, photo: true });
+    console.log(forceReport ? "Forced status report" : `Periodic report due (every ${REPORT_EVERY_HOURS}h)`);
   }
 
-  // یک پیام در هر اجرا
+  // یک پیام اولویت‌دار در هر اجرا
+  // اولویت: urgent (برگشت روند) > بقیه هشدارها > گزارش دوره‌ای
   let out = msgs;
-  if (!forceReport && out.length > 1) out = [out[0]];
-  else if (forceReport && out.length > 1) {
-    const status = out.find((m) => m.photo) || out[out.length - 1];
-    out = [status];
+  if (out.length > 1) {
+    const urgent = out.find((m) => m.urgent);
+    const status = out.find((m) => m.photo);
+    if (urgent) out = [urgent];
+    else if ((forceReport || duePeriodic) && status) out = [status];
+    else out = [out[0]];
   }
 
   // Always persist price series; cooldown marks only after successful send
   saveState(mem);
   if (!out.length) {
-    console.log("No alerts to send (no threshold; scheduled without REPORT)");
+    console.log("No alerts to send");
     return;
   }
 
   const chart = statusChartUrl(series, live);
+  const dryRun = process.env.DRY_RUN === "1";
   let sent = 0;
   for (const m of out) {
-    console.log("Sending:", m.text.slice(0, 120).replace(/\n/g, " | "));
+    console.log((dryRun ? "[DRY] " : "") + "Sending:", m.text.slice(0, 120).replace(/\n/g, " | "));
+    if (dryRun) {
+      if (m.key) mark(mem, m.key);
+      sent++;
+      continue;
+    }
     try {
       if (m.photo && chart) await sendTelegramPhoto(m.text, chart);
       else await sendTelegram(m.text);
@@ -362,7 +411,8 @@ async function main() {
     }
   }
   saveState(mem);
-  console.log(`Sent ${sent}/${out.length} message(s)`);
+  console.log(`${dryRun ? "Dry-run prepared" : "Sent"} ${sent}/${out.length} message(s)`);
+  if (!dryRun && sent === 0) process.exitCode = 1;
 }
 
 main().catch((e) => {
