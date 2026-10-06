@@ -8,7 +8,7 @@
  *   3) advice    — پیشنهاد کار مشخص برای کاربر
  *   4) targets   — لیست قیمت‌های هدف
  *   5) status    — گزارش کامل دوره‌ای
- *   6) alerts    — هشدارهای سقف/کف/سود/ضرر/روند
+ *   6) alerts    — سقف/کف/سود/ضرر + فازهای روند (آماده‌باش / فوری)
  *   7) chart     — لینک چارت وضعیت
  */
 
@@ -51,7 +51,6 @@ export function pnlHeadline(s, price, lastTrade) {
     return { emoji: "⚪", title: "قیمت هنوز مشخص نیست", pct: null, kind: "unknown", basis: null };
   }
 
-  // GRAM داری → نسبت به میانگین خرید
   if (s.totalGram > 1e-6 && s.avgBuyPrice > 0) {
     const pct = ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100;
     const basis = "قیمت میانگین خرید تو: " + fmt(s.avgBuyPrice, 4);
@@ -62,7 +61,6 @@ export function pnlHeadline(s, price, lastTrade) {
 
   const lt = lastTrade;
 
-  // آخرین معامله فروش بوده → USDT داری
   if (lt && lt.type === "sell" && lt.price > 0) {
     const pct = ((price - lt.price) / lt.price) * 100;
     const basis = "قیمت آخرین فروشت: " + fmt(lt.price, 4);
@@ -71,7 +69,6 @@ export function pnlHeadline(s, price, lastTrade) {
     return { emoji: "⚪", title: "نزدیک قیمت آخرین فروشت", pct, kind: "flat", basis };
   }
 
-  // آخرین معامله خرید بوده ولی موجودی GRAM نداریم (یا خیلی کم)
   if (lt && lt.type === "buy" && lt.price > 0) {
     const pct = ((price - lt.price) / lt.price) * 100;
     const basis = "قیمت آخرین خریدت: " + fmt(lt.price, 4);
@@ -147,7 +144,6 @@ export function targetsBlock(s, lastTrade, poolReserve) {
     out += "\n\nاگر بخواهی بفروشی، این قیمت‌ها را در نظر بگیر:";
     for (const L of levels) {
       const slip = s && s.totalGram > 0 ? estSlippagePct(s.totalGram, poolReserve) / 100 : 0;
-      // قیمت mid تقریبی برای رسیدن به حدود L٪ سود بعد از هزینه معامله
       const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
       out += "\n• حدود +" + L.tag + " سود ← قیمت نزدیک " + fmt(midNeed, 4);
     }
@@ -208,62 +204,57 @@ export function buildStatusMessage(s, live, quote, lastTrade, checks, poolReserv
 }
 
 // ─────────────────────────────────────────────
-// 6) alerts — هر پیام: چه شد؟ عددها؟ چه کار کنی؟
+// 6) alerts
 // ─────────────────────────────────────────────
 
-/** قیمت به سقف تعیین‌شده رسید */
 export function msgCeiling(above, live, stanceText) {
   return (
     "🔺 قیمت به سقف رسید\n\n" +
     "سقفی که گذاشته بودی: " + fmt(above, 4) + "\n" +
     "قیمت الان: " + fmt(live, 4) + "\n\n" +
-    "یعنی قیمت از حد بالای تنظیم‌شده بالاتر رفته.\n" +
-    "اگر GRAM داری، فروش را بررسی کن؛ اگر نداری فقط اطلاع است." +
+    "اگر بیشتر سرمایه‌ات GRAM است → فروش را جدی بررسی کن.\n" +
+    "اگر بیشتر تتر داری → فقط اطلاع است." +
     footer(stanceText)
   );
 }
 
-/** قیمت به کف تعیین‌شده رسید */
 export function msgFloor(below, live, stanceText) {
   return (
     "🔻 قیمت به کف رسید\n\n" +
     "کفی که گذاشته بودی: " + fmt(below, 4) + "\n" +
     "قیمت الان: " + fmt(live, 4) + "\n\n" +
-    "یعنی قیمت از حد پایین تنظیم‌شده پایین‌تر آمده.\n" +
-    "اگر می‌خواستی ارزان‌تر بخری، الان نزدیک همان محدوده است." +
+    "اگر بیشتر سرمایه‌ات تتر است → نزدیک محدوده خریدت هستی.\n" +
+    "اگر GRAM داری → فقط اطلاع است؛ عجله برای فروش از ترس لازم نیست." +
     footer(stanceText)
   );
 }
 
-/** GRAM خریدی و قیمت بالا رفته تا هدف سود */
 export function msgProfitBuy(movePct, targetPct, ref, live, stanceText) {
   return (
     "🟢 به هدف سود رسیدی\n\n" +
-    "از وقتی خریدی حدود +" + pctStr(movePct) + " بالاتر آمده\n" +
+    "از خریدت حدود +" + pctStr(movePct) + " بالاتر آمده\n" +
     "(هدف تو: +" + pctStr(targetPct, 2) + ")\n\n" +
     priceLine("قیمت خریدت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "پیشنهاد: اگر می‌خواهی سود را قطعی کنی، فروش را بررسی کن.\n" +
+    "چون هنوز GRAM داری: اگر می‌خواهی سود را قطعی کنی، فروش را بررسی کن.\n" +
     "تا نفروشی این سود فقط روی کاغذ است." +
     footer(stanceText)
   );
 }
 
-/** GRAM خریدی و قیمت پایین آمده تا آستانه ضرر */
 export function msgLossBuy(movePct, lossPct, ref, live, stanceText) {
   return (
     "🔴 قیمت از خریدت پایین‌تر آمده\n\n" +
     "حدود " + pctStr(movePct) + " نسبت به خریدت\n" +
-    "(آستانه‌ای که گذاشته بودی: −" + pctStr(lossPct, 2) + ")\n\n" +
+    "(آستانه تو: −" + pctStr(lossPct, 2) + ")\n\n" +
     priceLine("قیمت خریدت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
     "مهم: تا نفروشی ضرر قطعی نیست.\n" +
-    "پیشنهاد: عجله نکن؛ مگر خودت تصمیم به خروج گرفته باشی." +
+    "پیشنهاد: عجله نکن؛ مگر خودت از قبل برنامه خروج داری." +
     footer(stanceText)
   );
 }
 
-/** قبلاً فروختی و قیمت پایین آمده — فرصت خرید مجدد */
 export function msgProfitSell(movePct, targetPct, ref, live, stanceText) {
   return (
     "🟢 فرصت خرید دوباره\n\n" +
@@ -271,12 +262,11 @@ export function msgProfitSell(movePct, targetPct, ref, live, stanceText) {
     "(هدف تو: −" + pctStr(targetPct, 2) + ")\n\n" +
     priceLine("قیمت فروشت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "پیشنهاد: اگر هنوز USDT داری، خرید را بررسی کن." +
+    "چون بیشتر سرمایه‌ات تتر است: خرید را بررسی کن." +
     footer(stanceText)
   );
 }
 
-/** قبلاً فروختی و قیمت رفته بالا — از دست دادن فرصت */
 export function msgLossSell(movePct, lossPct, ref, live, stanceText) {
   return (
     "🟡 بعد از فروشت قیمت بالا رفته\n\n" +
@@ -284,63 +274,90 @@ export function msgLossSell(movePct, lossPct, ref, live, stanceText) {
     "(آستانه اطلاع: +" + pctStr(lossPct, 2) + ")\n\n" +
     priceLine("قیمت فروشت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "پیشنهاد: الان دنبال خرید عجولانه نرو.\n" +
-    "صبر کن قیمت دوباره نزدیک فروشت شود." +
+    "پیشنهاد: الان تعقیب نکن و عجولانه نخر.\n" +
+    "صبر کن دوباره نزدیک قیمت فروشت شود." +
     footer(stanceText)
   );
 }
 
-/** روند صعودی کوتاه‌مدت — معمولاً وقتی GRAM داری */
+/** GRAM داری + صعود ادامه دارد → آماده‌باش */
+export function msgRallyPrepare(from, live, movePct, stanceText) {
+  return (
+    "📈 GRAM داره رشد می‌کنه — آماده باش\n\n" +
+    "از " + fmt(from, 4) + " رسیده به " + fmt(live, 4) + "\n" +
+    "(حدود +" + pctStr(Math.abs(movePct)) + " در این بازه)\n\n" +
+    "چون بیشتر سرمایه‌ات GRAM است:\n" +
+    "رشد ادامه دارد. فروش عجله‌ای لازم نیست؛\n" +
+    "ولی اگر برگشت نزولی دیدیم، زود خبر می‌دهیم تا برای فروش آماده باشی." +
+    footer(stanceText)
+  );
+}
+
+/** GRAM داری + برگشت از صعود به نزول → فروش فوری */
+export function msgReversalSell(from, live, drop, movePct, stanceText) {
+  return (
+    "🚨 ریزش بعد از رشد — زود فروش را بررسی کن\n\n" +
+    "از " + fmt(from, 4) + " برگشته به " + fmt(live, 4) + "\n" +
+    "(حدود −" + pctStr(Math.abs(movePct || 0)) + " از اوج اخیر)\n\n" +
+    "چون بیشتر سرمایه‌ات GRAM است:\n" +
+    "روند بعد از بالا رفتن، نزولی شده.\n" +
+    "اگر نمی‌خواهی سود روی کاغذ از دست برود، همین حالا فروش را جدی بررسی کن." +
+    footer(stanceText)
+  );
+}
+
+/** تتر داری + نزول ادامه دارد → حواس‌جمع برای خرید */
+export function msgDumpWatch(from, live, movePct, stanceText) {
+  return (
+    "📉 قیمت داره می‌ریزه — حواست به خرید باشد\n\n" +
+    "از " + fmt(from, 4) + " رسیده به " + fmt(live, 4) + "\n" +
+    "(حدود −" + pctStr(Math.abs(movePct)) + " در این بازه)\n\n" +
+    "چون بیشتر سرمایه‌ات تتر است:\n" +
+    "ریزش ادامه دارد؛ عجله برای خرید وسط سقوط لازم نیست.\n" +
+    "اگر برگشت رو به بالا شروع شد، زود خبر می‌دهیم تا قبل از گرون شدن بخری." +
+    footer(stanceText)
+  );
+}
+
+/** تتر داری + برگشت از نزول به صعود → خرید فوری */
+export function msgReversalBuy(from, live, movePct, stanceText) {
+  return (
+    "🚨 برگشت رو به بالا — قبل از گرون شدن خرید را بررسی کن\n\n" +
+    "از " + fmt(from, 4) + " برگشته به " + fmt(live, 4) + "\n" +
+    "(حدود +" + pctStr(Math.abs(movePct || 0)) + " از کف اخیر)\n\n" +
+    "چون بیشتر سرمایه‌ات تتر است:\n" +
+    "بعد از ریزش، قیمت دوباره بالا آمده.\n" +
+    "اگر برنامه خرید داشتی، همین حالا بررسی کن تا جا نمانی." +
+    footer(stanceText)
+  );
+}
+
+/** سازگاری با نام‌های قدیمی */
 export function msgTrendUp(from, live, delta, stanceText) {
-  return (
-    "📈 قیمت در حال بالا رفتن است\n\n" +
-    "از " + fmt(from, 4) + " رسیده به " + fmt(live, 4) + "\n" +
-    "(حدود +" + fmt(Math.abs(delta), 4) + ")\n\n" +
-    "اگر GRAM داری و به هدف سود نزدیک شده‌ای، فروش را بررسی کن." +
-    footer(stanceText)
-  );
+  const movePct = from > 0 ? (Math.abs(delta) / from) * 100 : 0;
+  return msgRallyPrepare(from, live, movePct, stanceText);
 }
-
-/** روند نزولی — وقتی GRAM داری */
 export function msgTrendDown(from, live, drop, stanceText) {
-  return (
-    "📉 قیمت در حال پایین آمدن است\n\n" +
-    "از " + fmt(from, 4) + " رسیده به " + fmt(live, 4) + "\n" +
-    "(حدود −" + fmt(drop, 4) + ")\n\n" +
-    "اگر GRAM داری: عجله برای فروش از ترس لازم نیست مگر خودت برنامه خروج داری." +
-    footer(stanceText)
-  );
+  const movePct = from > 0 ? (Math.abs(drop) / from) * 100 : 0;
+  return msgReversalSell(from, live, drop, movePct, stanceText);
 }
-
-/** افت قیمت — وقتی USDT داری و ممکن است فرصت خرید باشد */
 export function msgDrop(from, live, drop, stanceText) {
-  return (
-    "📉 قیمت آمده پایین — ممکن است فرصت خرید باشد\n\n" +
-    "از " + fmt(from, 4) + " رسیده به " + fmt(live, 4) + "\n" +
-    "(حدود −" + fmt(drop, 4) + ")\n\n" +
-    "اگر USDT داری و دنبال ورود هستی، خرید را بررسی کن.\n" +
-    "اگر هنوز مطمئن نیستی، صبر کن افت بیشتر یا تثبیت ببینی." +
-    footer(stanceText)
-  );
+  const movePct = from > 0 ? (Math.abs(drop) / from) * 100 : 0;
+  return msgDumpWatch(from, live, movePct, stanceText);
 }
-
-/** برگشت رو به بالا بعد از افت — برای کسی که می‌خواهد بخرد */
 export function msgBounce(delta, live, stanceText) {
-  return (
-    "📈 قیمت برگشت رو به بالا\n\n" +
-    "حرکت اخیر حدود +" + fmt(Math.abs(delta), 4) + "\n" +
-    priceLine("قیمت الان", live) + "\n\n" +
-    "اگر منتظر خرید بودی: فقط در صورتی وارد شو که هنوز نسبت به برنامه خودت قیمت مناسب است.\n" +
-    "اگر قیمت از هدف خریدت بالاتر رفته، تعقیب نکن." +
-    footer(stanceText)
-  );
+  const from = live - Math.abs(delta);
+  const movePct = from > 0 ? (Math.abs(delta) / from) * 100 : 0;
+  return msgReversalBuy(from, live, movePct, stanceText);
 }
 
 export function msgConnected() {
   return (
     "✅ اتصال تلگرام برقرار شد\n\n" +
     "از این به بعد هشدارها و گزارش‌های GRAM همین‌جا می‌آید.\n" +
-    "اگر پیام نیامد، تنظیمات سقف/کف و درصدها را در برنامه چک کن."
+    "منطق پیام‌ها:\n" +
+    "• اگر GRAM داری → رشد = آماده‌باش، برگشت نزولی = خبر فروش\n" +
+    "• اگر تتر داری → ریزش = حواس‌جمع، برگشت صعودی = خبر خرید"
   );
 }
 
@@ -349,7 +366,6 @@ export function msgConnected() {
 // ─────────────────────────────────────────────
 
 /**
- * QuickChart URL برای اسپارک‌لاین (بدون API key)
  * @param {Array<{t?:number,p:number}>} series
  * @param {number|null} live
  */
