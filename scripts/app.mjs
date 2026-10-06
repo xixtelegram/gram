@@ -10,10 +10,10 @@ import {
   msgLossBuy,
   msgProfitSell,
   msgLossSell,
-  msgTrendUp,
-  msgTrendDown,
-  msgDrop,
-  msgBounce,
+  msgRallyPrepare,
+  msgReversalSell,
+  msgDumpWatch,
+  msgReversalBuy,
   msgConnected,
 } from "./telegram-messages.mjs";
 
@@ -24,7 +24,7 @@ const KEY = "gram_trades_v2", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_m
 const DEFAULT_WALLET = ""; // no default — user must paste their own address
 const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
 // Noise as fraction of price (1.2%); floor avoids zero at tiny prices
-const NOISE_PCT = 0.012, NOISE_FLOOR = 0.008;
+const NOISE_PCT = 0.012, NOISE_FLOOR = 1e-6;
 const MIN_ACTION_PCT = 0.5; // min edge over BE before suggesting sell/buy
 // Rough pool TON reserve for slippage estimate (updated from STON when available)
 let poolTonReserve = 1.7e6;
@@ -879,66 +879,68 @@ function pushPriceSample(price) {
 }
 
 /**
- * Multi-window momentum. Noise = max(floor, pct * price).
- * Short ≈ 15m, medium ≈ 45m (at 45s samples).
+ * Trend phases (aligned with gram-core):
+ *   rally | dump | reversal_down | reversal_up | flat
+ * Conflict short vs prior/medium = REVERSAL (urgent), not flat.
  */
 function detectMomentum(series) {
-  if (!series || series.length < 4) return { dir: "flat", delta: 0, from: null, to: null, bars: 0, medDir: "flat", medDelta: 0 };
-  const shortN = Math.min(series.length, 20);  // ~15 min
-  const medN = Math.min(series.length, 60);    // ~45 min
-  const short = series.slice(-shortN);
-  const med = series.slice(-medN);
-  const nAbs = noiseAbs(short[short.length - 1].p);
+  const empty = { dir: "flat", phase: "flat", delta: 0, from: null, to: null, noise: NOISE_FLOOR, medDir: "flat", prevDir: "flat", strength: 0, movePct: 0 };
+  if (!series || series.length < 6) return empty;
+  const lastP = series[series.length - 1].p;
+  const nAbs = noiseAbs(lastP);
+  const shortN = Math.min(series.length, 16);
+  const prevN = Math.min(Math.max(0, series.length - shortN), 16);
+  const medN = Math.min(series.length, 48);
   function win(arr) {
+    if (!arr || arr.length < 2) return { dir: "flat", delta: 0, from: null, to: null, movePct: 0 };
     const from = arr[0].p, to = arr[arr.length - 1].p, delta = to - from;
     let up = 0, down = 0;
+    const step = nAbs * 0.45;
     for (let i = 1; i < arr.length; i++) {
       const d = arr[i].p - arr[i - 1].p;
-      if (d >= nAbs) up++;
-      else if (d <= -nAbs) down++;
+      if (d >= step) up++;
+      else if (d <= -step) down++;
     }
     let dir = "flat";
     if (Math.abs(delta) >= nAbs) {
       if (delta > 0 && up >= down) dir = "up";
       else if (delta < 0 && down >= up) dir = "down";
     }
-    return { dir, delta, from, to, bars: dir === "up" ? up : dir === "down" ? down : 0 };
+    return { dir, delta, from, to, movePct: from > 0 ? (delta / from) * 100 : 0 };
   }
-  const s = win(short), m = win(med);
-  // Prefer aligned direction; if conflict → flat (avoid whipsaw)
-  let dir = s.dir;
-  if (s.dir !== "flat" && m.dir !== "flat" && s.dir !== m.dir) dir = "flat";
-  else if (s.dir === "flat" && m.dir !== "flat") dir = m.dir;
-  return { dir, delta: s.delta, from: s.from, to: s.to, bars: s.bars, medDir: m.dir, medDelta: m.delta, noise: nAbs };
+  const short = win(series.slice(-shortN));
+  const prev = prevN >= 4 ? win(series.slice(-(shortN + prevN), -shortN || undefined)) : { dir: "flat", delta: 0, movePct: 0 };
+  const med = win(series.slice(-medN));
+  let phase = "flat", dir = short.dir;
+  if (short.dir === "down" && Math.abs(short.delta) >= nAbs && (prev.dir === "up" || med.dir === "up")) {
+    phase = "reversal_down"; dir = "down";
+  } else if (short.dir === "up" && Math.abs(short.delta) >= nAbs && (prev.dir === "down" || med.dir === "down")) {
+    phase = "reversal_up"; dir = "up";
+  } else if (short.dir === "up" && (med.dir === "up" || prev.dir === "up" || med.dir === "flat")) {
+    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.4) { phase = "rally"; dir = "up"; }
+  } else if (short.dir === "down" && (med.dir === "down" || prev.dir === "down" || med.dir === "flat")) {
+    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.4) { phase = "dump"; dir = "down"; }
+  } else if (short.dir === "flat" && med.dir === "up") { phase = "rally"; dir = "up"; }
+  else if (short.dir === "flat" && med.dir === "down") { phase = "dump"; dir = "down"; }
+  return {
+    dir, phase, delta: short.delta, from: short.from, to: short.to, noise: nAbs,
+    medDir: med.dir, prevDir: prev.dir, strength: Math.abs(short.movePct || 0), movePct: short.movePct || 0,
+  };
 }
 
-/** Position stance from last swap / balances */
+/** Position from real balances + live price (not only last swap) */
 function positionStance(s) {
   const hasGram = s.totalGram > 1e-6;
   const hasUsdt = s.cashUsdt > 1e-6;
-  if (hasGram && !hasUsdt) {
-    return {
-      mode: "hold_gram",
-      label: "GRAM داری",
-      action: "sell"
-    };
-  }
-  if (hasUsdt && !hasGram) {
-    return {
-      mode: "hold_usdt",
-      label: "USDT داری",
-      action: "buy"
-    };
-  }
+  if (hasGram && !hasUsdt) return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
+  if (hasUsdt && !hasGram) return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
   if (hasGram && hasUsdt) {
-    // mixed: prefer the larger side by equity share
-    const gVal = s.totalGram * (live || s.avgBuyPrice || 0);
-    if (gVal >= s.cashUsdt) {
-      return { mode: "hold_gram", label: "بیشتر GRAM داری", action: "sell" };
-    }
-    return { mode: "hold_usdt", label: "بیشتر USDT داری", action: "buy" };
+    const px = (live > 0 ? live : null) || s.avgBuyPrice || 0;
+    const gVal = s.totalGram * px;
+    if (gVal >= s.cashUsdt) return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
+    return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
   }
-  return { mode: "empty", label: "پوزیشن خالی", action: null };
+  return { mode: "empty", label: "پوزیشن مشخصی نیست", action: null };
 }
 
 /** True if a sell at live would be meaningfully above break-even (not just noise) */
@@ -993,10 +995,18 @@ function maybeAlert(state) {
   let mem = null;
   try { mem = JSON.parse(localStorage.getItem(MEMKEY) || "null"); } catch (_) {}
   if (!mem || typeof mem !== "object") mem = {};
-  const now = Date.now(), cool = 20 * 60 * 1000, coolMom = 12 * 60 * 1000;
+  const now = Date.now();
+  const cool = 20 * 60 * 1000;       // درصد نسبت به سواپ / سقف‌کف
+  const coolPhase = 18 * 60 * 1000;  // rally / dump (آماده‌باش)
+  const coolRev = 8 * 60 * 1000;     // برگشت روند — فوری‌تر، cooldown کوتاه‌تر
   const recently = (k, c) => mem[k] && now - mem[k] < (c || cool);
   // Global gap: at most one Telegram message every ALERT_GLOBAL_GAP_MS
-  if (mem._lastAny && now - mem._lastAny < ALERT_GLOBAL_GAP_MS) return false;
+  // استثنا: برگشت فوری می‌تواند gap را کمی بشکند (نیمه gap)
+  const isUrgentPhase =
+    (mom.phase === "reversal_down" && stance.action === "sell") ||
+    (mom.phase === "reversal_up" && stance.action === "buy");
+  const gapMs = isUrgentPhase ? Math.min(ALERT_GLOBAL_GAP_MS, 45 * 1000) : ALERT_GLOBAL_GAP_MS;
+  if (mem._lastAny && now - mem._lastAny < gapMs) return false;
   if (maybeAlert._inFlight) return false;
   const mark = (k) => {
     mem[k] = now;
@@ -1014,7 +1024,6 @@ function maybeAlert(state) {
         if (okToast) toast(okToast);
       })
       .catch(() => {
-        // Undo soft gap so a real failure can retry on the next price tick
         if (mem._lastAny === now) delete mem._lastAny;
         try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
         toast("هشدار ارسال نشد");
@@ -1023,76 +1032,92 @@ function maybeAlert(state) {
     return true;
   };
 
-  // Priority 1: fixed ceiling / floor
-  if (above > 0 && live >= above && !recently("above")) {
-    return sendOne("above", msgCeiling(above, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
+  const stText = () => stanceLine(stance, state, live);
+  const nAbs = mom.noise || noiseAbs(live);
+  const movePct = mom.movePct != null ? mom.movePct : (mom.from > 0 ? ((live - mom.from) / mom.from) * 100 : 0);
+
+  // ── Priority 0: برگشت روند (فوری) — وابسته به پوزیشن واقعی ──
+  if (stance.action === "sell" && mom.phase === "reversal_down" && !recently("phase_rev_sell", coolRev)) {
+    if (Math.abs(mom.delta) >= nAbs) {
+      return sendOne(
+        "phase_rev_sell",
+        msgReversalSell(mom.from, live, Math.abs(mom.delta), Math.abs(movePct), stText()),
+        "هشدار: ریزش بعد از رشد"
+      );
+    }
   }
-  if (below > 0 && live <= below && !recently("below")) {
-    return sendOne("below", msgFloor(below, live, stanceLine(stance, state, live)), "هشدار تلگرام ارسال شد");
+  if (stance.action === "buy" && mom.phase === "reversal_up" && !recently("phase_rev_buy", coolRev)) {
+    if (Math.abs(mom.delta) >= nAbs) {
+      return sendOne(
+        "phase_rev_buy",
+        msgReversalBuy(mom.from, live, Math.abs(movePct), stText()),
+        "هشدار: برگشت برای خرید"
+      );
+    }
   }
 
-  // Priority 2: vs last swap (one message only)
+  // ── Priority 1: سقف / کف دستی ──
+  if (above > 0 && live >= above && !recently("above")) {
+    return sendOne("above", msgCeiling(above, live, stText()), "هشدار سقف قیمت");
+  }
+  if (below > 0 && live <= below && !recently("below")) {
+    return sendOne("below", msgFloor(below, live, stText()), "هشدار کف قیمت");
+  }
+
+  // ── Priority 2: درصد نسبت به آخرین سواپ — فقط هم‌جهت با پوزیشن ──
   const lt = lastTrade();
   if (lt && lt.price > 0) {
     const ref = lt.price;
-    const movePct = ((live - ref) / ref) * 100;
-    if (lt.type === "buy") {
+    const vsSwap = ((live - ref) / ref) * 100;
+    // GRAM داری + آخرین سواپ خرید → سود/ضرر روی خرید
+    if (stance.action === "sell" && lt.type === "buy") {
       for (const targetPct of profitPcts) {
         const key = "ls_profit_buy_" + targetPct;
-        if (movePct >= targetPct && !recently(key)) {
-          return sendOne(key, msgProfitBuy(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار سود ارسال شد");
+        if (vsSwap >= targetPct && !recently(key)) {
+          return sendOne(key, msgProfitBuy(vsSwap, targetPct, ref, live, stText()), "هشدار هدف سود");
         }
       }
       for (const lossPct of lossPcts) {
         const key = "ls_loss_buy_" + lossPct;
-        if (movePct <= -lossPct && !recently(key)) {
-          return sendOne(key, msgLossBuy(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار ضرر ارسال شد");
+        if (vsSwap <= -lossPct && !recently(key)) {
+          return sendOne(key, msgLossBuy(vsSwap, lossPct, ref, live, stText()), "هشدار افت از خرید");
         }
       }
-    } else if (lt.type === "sell") {
+    }
+    // تتر داری + آخرین سواپ فروش → فرصت خرید / رشد بعد از فروش
+    if (stance.action === "buy" && lt.type === "sell") {
       for (const targetPct of profitPcts) {
         const key = "ls_profit_sell_" + targetPct;
-        if (movePct <= -targetPct && !recently(key)) {
-          return sendOne(key, msgProfitSell(movePct, targetPct, ref, live, stanceLine(stance, state, live)), "هشدار فرصت خرید");
+        if (vsSwap <= -targetPct && !recently(key)) {
+          return sendOne(key, msgProfitSell(vsSwap, targetPct, ref, live, stText()), "هشدار فرصت خرید");
         }
       }
       for (const lossPct of lossPcts) {
         const key = "ls_loss_sell_" + lossPct;
-        if (movePct >= lossPct && !recently(key)) {
-          return sendOne(key, msgLossSell(movePct, lossPct, ref, live, stanceLine(stance, state, live)), "هشدار رشد بعد از فروش");
+        if (vsSwap >= lossPct && !recently(key)) {
+          return sendOne(key, msgLossSell(vsSwap, lossPct, ref, live, stText()), "هشدار رشد بعد از فروش");
         }
       }
     }
   }
 
-  // Priority 3: momentum (lowest)
-  if (mom.dir === "up" && stance.action === "sell" && !recently("mom_up_sell", coolMom)) {
-    if (sellIsWorthwhile(state, live)) {
-      return sendOne("mom_up_sell", msgTrendUp(mom.from, live, mom.delta, stanceLine(stance, state, live)), "هشدار روند صعودی");
+  // ── Priority 3: ادامه روند — آماده‌باش (اسپم کم) ──
+  if (stance.action === "sell" && mom.phase === "rally" && !recently("phase_rally", coolPhase)) {
+    if (Math.abs(mom.delta) >= nAbs || mom.strength >= 0.6) {
+      return sendOne(
+        "phase_rally",
+        msgRallyPrepare(mom.from, live, Math.abs(movePct), stText()),
+        "آماده‌باش: رشد GRAM"
+      );
     }
   }
-  if (mom.dir === "down" && stance.action === "sell" && !recently("mom_down_sell", coolMom)) {
-    const drop = Math.abs(mom.delta);
-    const nAbs = mom.noise || noiseAbs(live);
-    if (drop >= nAbs) {
-      return sendOne("mom_down_sell", msgTrendDown(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار روند نزولی");
-    }
-  }
-  if (mom.dir === "down" && stance.action === "buy" && !recently("mom_down_buy", coolMom)) {
-    const drop = Math.abs(mom.delta);
-    const nAbs = mom.noise || noiseAbs(live);
-    if (drop >= nAbs && buyIsWorthwhile(state, live)) {
-      return sendOne("mom_down_buy", msgDrop(mom.from, live, drop, stanceLine(stance, state, live)), "هشدار فرصت خرید");
-    }
-  }
-  if (mom.dir === "up" && stance.action === "buy" && !recently("mom_up_buy", coolMom)) {
-    const nAbs = mom.noise || noiseAbs(live);
-    if (buyIsWorthwhile(state, live) || Math.abs(mom.delta) >= nAbs) {
-      const ref = (state.lastSwapType === "sell" && state.lastSwapPrice) ? state.lastSwapPrice : null;
-      const chasing = ref != null && live > ref + nAbs;
-      if (!chasing) {
-        return sendOne("mom_up_buy", msgBounce(mom.delta, live, stanceLine(stance, state, live)), "هشدار خرید روی برگشت");
-      }
+  if (stance.action === "buy" && mom.phase === "dump" && !recently("phase_dump", coolPhase)) {
+    if (Math.abs(mom.delta) >= nAbs || mom.strength >= 0.6) {
+      return sendOne(
+        "phase_dump",
+        msgDumpWatch(mom.from, live, Math.abs(movePct), stText()),
+        "حواست باشد: ریزش قیمت"
+      );
     }
   }
 
