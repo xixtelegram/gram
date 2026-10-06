@@ -1,0 +1,119 @@
+# GRAM Telegram Alerts — runs on GitHub even when your PC is off
+#
+# Setup (one-time):
+#   1. Push this repo to GitHub
+#   2. Settings → Secrets and variables → Actions → New repository secret
+#        TELEGRAM_BOT_TOKEN   = bot token from @BotFather
+#        TELEGRAM_CHAT_ID     = your numeric chat id (@userinfobot)
+#        WALLET_ADDRESS       = your TON wallet address
+#   3. Optional secrets (same page):
+#        ALERT_ABOVE          e.g. 0.012
+#        ALERT_BELOW          e.g. 0.008
+#        ALERT_PROFIT_PCTS    e.g. 0.5,1,1.5,2,3
+#        ALERT_LOSS_PCTS      e.g. 0.5,1,2
+#        REPORT_EVERY_HOURS   e.g. 6   (status+chart while offline)
+#   4. Actions tab → enable workflows if prompted
+#   5. Run once manually: Actions → GRAM Telegram Alerts → Run workflow
+#
+# Notes:
+#   - Schedule is every 10 minutes (GitHub may delay a few minutes under load)
+#   - Cooldown state is restored via Actions cache between runs
+#   - concurrency prevents overlapping runs from stacking
+
+name: GRAM Telegram Alerts
+
+on:
+  schedule:
+    # Every 10 minutes — reliable enough for price alerts without burning minutes
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      report:
+        description: "ارسال گزارش کامل وضعیت + چارت"
+        type: boolean
+        default: true
+      dry_run:
+        description: "فقط لاگ (بدون ارسال تلگرام) — برای تست"
+        type: boolean
+        default: false
+
+concurrency:
+  group: gram-telegram-alerts
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  alert:
+    name: Check price & send Telegram
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Restore alert state (cooldowns + price series)
+        uses: actions/cache@v4
+        with:
+          path: .alert-state.json
+          # Unique key each run so cache is always written; restore-keys picks latest
+          key: gram-alert-state-${{ github.run_id }}
+          restore-keys: |
+            gram-alert-state-
+
+      - name: Verify secrets
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
+        run: |
+          set -e
+          missing=0
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "::error::Missing secret TELEGRAM_BOT_TOKEN"; missing=1; fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then echo "::error::Missing secret TELEGRAM_CHAT_ID"; missing=1; fi
+          if [ -z "$WALLET_ADDRESS" ]; then echo "::error::Missing secret WALLET_ADDRESS"; missing=1; fi
+          if [ "$missing" = "1" ]; then exit 1; fi
+          echo "Secrets present. Chat ID length=${#TELEGRAM_CHAT_ID} Wallet prefix=${WALLET_ADDRESS:0:6}…"
+
+      - name: Run ton-alert
+        working-directory: scripts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
+          ALERT_ABOVE: ${{ secrets.ALERT_ABOVE }}
+          ALERT_BELOW: ${{ secrets.ALERT_BELOW }}
+          ALERT_PROFIT_PCTS: ${{ secrets.ALERT_PROFIT_PCTS }}
+          ALERT_LOSS_PCTS: ${{ secrets.ALERT_LOSS_PCTS }}
+          REPORT_EVERY_HOURS: ${{ secrets.REPORT_EVERY_HOURS }}
+          STATE_PATH: ${{ github.workspace }}/.alert-state.json
+          EVENT_NAME: ${{ github.event_name }}
+          REPORT: ${{ github.event_name == 'workflow_dispatch' && inputs.report && '1' || '0' }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          set -e
+          if [ ! -f ton-alert.mjs ]; then
+            echo "::error::scripts/ton-alert.mjs not found — check repo structure"
+            ls -la
+            exit 1
+          fi
+          if [ "${DRY_RUN}" = "1" ]; then
+            echo "DRY_RUN=1 — skipping live send (logic still runs if script supports it)"
+          fi
+          node ton-alert.mjs
+
+      - name: Upload state artifact (debug / backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alert-state-${{ github.run_id }}
+          path: .alert-state.json
+          if-no-files-found: ignore
+          retention-days: 7
