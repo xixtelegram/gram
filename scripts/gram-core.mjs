@@ -10,13 +10,10 @@ export const NOISE_PCT = 0.012;
 /** Absolute floor kept tiny so low-priced tokens (e.g. GRAM ~0.01) still detect moves */
 export const NOISE_FLOOR = 1e-6;
 export const MIN_ACTION_PCT = 0.5;
-export const ADVICE_LEVELS = [
-  { pct: 0.5, tag: "کمی" },
-  { pct: 1, tag: "بهتر" },
-  { pct: 2, tag: "خوب" },
-  { pct: 3, tag: "خیلی خوب" },
-  { pct: 5, tag: "عالی" },
-];
+/** Percent steps only — Persian labels live in telegram-messages.mjs */
+export const ADVICE_PCTS = [0.5, 1, 2, 3, 5];
+/** @deprecated use ADVICE_PCTS; kept for older imports */
+export const ADVICE_LEVELS = ADVICE_PCTS.map((pct) => ({ pct, tag: String(pct) }));
 
 export function num(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -275,17 +272,16 @@ export function lastTrade(list) {
 export function positionStance(s, livePrice = null) {
   const hasGram = s && s.totalGram > 1e-6;
   const hasUsdt = s && s.cashUsdt > 1e-6;
-  if (hasGram && !hasUsdt) return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
-  if (hasUsdt && !hasGram) return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
+  // Labels are in telegram-messages.stanceLabel — core stays language-free
+  if (hasGram && !hasUsdt) return { mode: "hold_gram", action: "sell" };
+  if (hasUsdt && !hasGram) return { mode: "hold_usdt", action: "buy" };
   if (hasGram && hasUsdt) {
     const px = (livePrice != null && livePrice > 0) ? livePrice : (s.avgBuyPrice || 0);
     const gVal = s.totalGram * px;
-    if (gVal >= (s.cashUsdt || 0)) {
-      return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
-    }
-    return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
+    if (gVal >= (s.cashUsdt || 0)) return { mode: "hold_gram", action: "sell" };
+    return { mode: "hold_usdt", action: "buy" };
   }
-  return { mode: "empty", label: "پوزیشن مشخصی نیست", action: null };
+  return { mode: "empty", action: null };
 }
 
 export function sellIsWorthwhile(s, price, poolTonReserve = 1.7e6) {
@@ -304,127 +300,6 @@ export function buyIsWorthwhile(s, price, poolTonReserve = 1.7e6) {
     return pct >= MIN_ACTION_PCT && (ref - exec) >= noiseAbs(price) * 0.5;
   }
   return true;
-}
-
-/** Beginner-friendly last-swap advice block for Telegram + UI */
-export function lastSwapAdviceBlock(s, price, poolTonReserve = 1.7e6) {
-  const ltType = s && s.lastSwapType;
-  const ref = s && s.lastSwapPrice;
-  if (!ltType || !(ref > 0)) return "";
-  const pad = 1 - ROUND / 100;
-  let out = "\n\nپیشنهاد:";
-  if (ltType === "buy") {
-    const curPct = price ? ((price - ref) / ref) * 100 : null;
-    out += `\nآخرین خرید تو: ${fmt(ref)} USDT`;
-    if (price) out += `\nقیمت الان:     ${fmt(price)} USDT`;
-    if (curPct != null) {
-      out += `\nیعنی حدود ${curPct >= 0 ? "+" : "−"}${Math.abs(curPct).toFixed(2)}٪ ${curPct >= 0 ? "بالاتر" : "پایین‌تر"} از خرید`;
-    }
-    if (s.totalGram > 0) {
-      out += `\n\nوضعیت تو: GRAM داری` + (s.cashUsdt > 0 ? ` (و ${fmt(s.cashUsdt, 2)} USDT)` : "");
-    }
-    if (curPct != null && curPct >= MIN_ACTION_PCT) {
-      out += "\nاگر بفروشی، نسبت به خریدت در سودی (لغزش استخر را در نظر بگیر).";
-    } else {
-      out += "\nبرای فروش بهتر است صبر کنی تا نزدیک اهداف زیر برسد.";
-    }
-    out += "\n\nاهداف فروش پیشنهادی:";
-    for (const L of ADVICE_LEVELS) {
-      const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram, poolTonReserve) / 100 : 0;
-      const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
-      out += `\n• ${L.tag} (+${L.pct}٪): حدود ${fmt(midNeed)}`;
-    }
-  } else {
-    const curPct = price ? ((ref - price) / ref) * 100 : null;
-    out += `\nآخرین فروش تو: ${fmt(ref)} USDT`;
-    if (price) out += `\nقیمت الان:     ${fmt(price)} USDT`;
-    if (curPct != null) {
-      out += `\nیعنی حدود ${curPct >= 0 ? "−" : "+"}${Math.abs(curPct).toFixed(2)}٪ ${curPct >= 0 ? "ارزان‌تر" : "گران‌تر"} از وقتی فروختی`;
-    }
-    out += `\n\nوضعیت تو: ${s.cashUsdt > 0 ? `USDT داری (حدود ${fmt(s.cashUsdt, 2)})` : "USDT کمی داری"}`;
-    if (s.totalGram > 1e-6) out += " · کمی هم GRAM داری";
-    if (curPct != null && curPct >= MIN_ACTION_PCT) {
-      out += "\nاگر دوباره بخری، نسبت به فروش قبلی‌ات جا برای سود داری.";
-    } else {
-      out += "\nعجله نکن. برای خرید دوباره بهتر است صبر کنی تا نزدیک اهداف پایین بیاید:";
-    }
-    out += "\n\nاهداف خرید پیشنهادی:";
-    for (const L of ADVICE_LEVELS) {
-      const target = ref * (1 - L.pct / 100) * pad;
-      out += `\n• ${L.tag} (−${L.pct}٪): حدود ${fmt(target)}`;
-    }
-  }
-  return out;
-}
-
-export function stanceLine(s, price, poolTonReserve = 1.7e6) {
-  const stance = positionStance(s);
-  let line = "";
-  if (stance.mode === "hold_gram") {
-    line = "وضعیت تو: GRAM داری";
-    if (s.avgBuyPrice) {
-      line += `\nمیانگین ورود: ${fmt(s.avgBuyPrice)}`;
-      if (price) {
-        const pct = ((price - s.avgBuyPrice) / s.avgBuyPrice) * 100;
-        line += `\nنسبت به ورود: ${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}٪`;
-      }
-    }
-  } else if (stance.mode === "hold_usdt") {
-    line = "وضعیت تو: USDT داری" + (s.cashUsdt > 0 ? ` (حدود ${fmt(s.cashUsdt, 2)})` : "");
-    if (s.totalGram > 1e-6) line += `\nکمی هم GRAM داری: ${fmt(s.totalGram, 4)}`;
-  } else {
-    line = "وضعیت تو: پوزیشن مشخصی نیست";
-  }
-  line += lastSwapAdviceBlock(s, price, poolTonReserve);
-  return line;
-}
-
-/** Structured advice for UI cards */
-export function buildAdvice(s, price, poolTonReserve = 1.7e6) {
-  const ref = s.lastSwapPrice;
-  const type = s.lastSwapType;
-  if (!type || !(ref > 0)) {
-    return { hint: "هنوز سواپی ثبت نشده — همگام‌سازی کیف‌پول را بزن", meta: "", rows: [], lastType: null, ref: null, suggest: null };
-  }
-  const pad = 1 - ROUND / 100;
-  const rows = [];
-  if (type === "buy") {
-    const curPct = price > 0 ? ((price - ref) / ref) * 100 : null;
-    let hint = `آخرین سواپ: خرید GRAM @ ${fmt(ref)}`;
-    if (curPct != null) {
-      hint += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? "سود " : "ضرر "}${Math.abs(curPct).toFixed(2)}٪ نسبت به خرید`;
-    }
-    for (const L of ADVICE_LEVELS) {
-      const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram, poolTonReserve) / 100 : 0;
-      const midNeed = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
-      rows.push({
-        label: `فروش +${L.pct}٪`,
-        price: midNeed,
-        detail: `${L.tag} — mid حدود ${fmt(midNeed)}`,
-      });
-    }
-    const suggest = curPct != null && curPct >= MIN_ACTION_PCT ? "to_usdt" : null;
-    if (suggest) hint += "\n✅ بعد از لغزش در سود معنادار هستی — می‌توانی بفروشی";
-    else if (curPct != null && curPct < 0) hint += `\nمنتظر برگشت بالای ${fmt(ref)} بمان`;
-    return { hint, meta: "مرجع = قیمت سواپ آخر (خرید)", rows, lastType: "buy", ref, suggest, breakEven: ref / pad, beExact: ref };
-  }
-  const curPct = price > 0 ? ((ref - price) / ref) * 100 : null;
-  let hint = `آخرین سواپ: فروش GRAM @ ${fmt(ref)}`;
-  if (curPct != null) {
-    hint += `\nالان mid: ${fmt(price)} → ${curPct >= 0 ? curPct.toFixed(2) + "٪ ارزان‌تر از فروش" : Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش"}`;
-  }
-  for (const L of ADVICE_LEVELS) {
-    const target = ref * (1 - L.pct / 100) * pad;
-    rows.push({
-      label: `خرید −${L.pct}٪`,
-      price: target,
-      detail: `${L.tag} — زیر ${fmt(target)}`,
-    });
-  }
-  const suggest = curPct != null && curPct >= MIN_ACTION_PCT ? "to_gram" : null;
-  if (suggest) hint += "\n✅ نسبت به فروش آخر ارزان‌تر شده — می‌توانی دوباره بخری";
-  else hint += "\nمنتظر ریزش زیر اهداف خرید بمان";
-  return { hint, meta: "مرجع = قیمت سواپ آخر (فروش)", rows, lastType: "sell", ref, suggest, breakEven: ref * pad, beExact: ref };
 }
 
 /**
@@ -527,12 +402,4 @@ export function detectMomentum(series) {
   };
 }
 
-/** Reconcile note for UI */
-export function reconcileNote(s) {
-  if (!s || !s.fromWallet) return "بعد از همگام‌سازی، موجودی از کیف‌پول خوانده می‌شود.";
-  const d = Math.abs((s.bookGram || 0) - (s.totalGram || 0));
-  if (d > 0.5) {
-    return `✓ موجودی از کیف‌پول · دفتر سواپ‌ها ${fmt(s.bookGram, 4)} GRAM (اختلاف ${fmt(d, 4)} احتمالاً واریز/برداشت غیرسواپ یا تاریخچه ناقص)`;
-  }
-  return `✓ موجودی از کیف‌پول · دفتر سواپ با زنجیره هم‌خوان است`;
-}
+/* reconcileNote moved to telegram-messages.mjs — single copy source */
