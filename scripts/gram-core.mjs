@@ -7,7 +7,8 @@ export const STON_POOL = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
 export const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
 export const ROUND = 0.2;
 export const NOISE_PCT = 0.012;
-export const NOISE_FLOOR = 0.008;
+/** Absolute floor kept tiny so low-priced tokens (e.g. GRAM ~0.01) still detect moves */
+export const NOISE_FLOOR = 1e-6;
 export const MIN_ACTION_PCT = 0.5;
 export const ADVICE_LEVELS = [
   { pct: 0.5, tag: "کمی" },
@@ -29,8 +30,10 @@ export function fmt(n, d = 4) {
 }
 
 export function noiseAbs(price) {
-  const p = price || 1;
-  return Math.max(NOISE_FLOOR, p * NOISE_PCT);
+  const p = Number(price);
+  const px = Number.isFinite(p) && p > 0 ? p : 1;
+  // Primary: percent of price; floor only avoids zero at pathological prices
+  return Math.max(NOISE_FLOOR, px * NOISE_PCT);
 }
 
 /** @param {number} poolTonReserve */
@@ -265,15 +268,22 @@ export function lastTrade(list) {
   return list.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || (b.id || 0) - (a.id || 0))[0];
 }
 
-export function positionStance(s) {
+/**
+ * @param {object} s calcState result
+ * @param {number|null} [livePrice] current mid — for mixed bags use live value, not avg entry
+ */
+export function positionStance(s, livePrice = null) {
   const hasGram = s && s.totalGram > 1e-6;
   const hasUsdt = s && s.cashUsdt > 1e-6;
-  if (hasGram && !hasUsdt) return { mode: "hold_gram", label: "GRAM داری", action: "sell" };
-  if (hasUsdt && !hasGram) return { mode: "hold_usdt", label: "USDT داری", action: "buy" };
+  if (hasGram && !hasUsdt) return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
+  if (hasUsdt && !hasGram) return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
   if (hasGram && hasUsdt) {
-    const gVal = s.totalGram * (s.avgBuyPrice || 0);
-    if (gVal >= s.cashUsdt) return { mode: "hold_gram", label: "بیشتر GRAM داری", action: "sell" };
-    return { mode: "hold_usdt", label: "بیشتر USDT داری", action: "buy" };
+    const px = (livePrice != null && livePrice > 0) ? livePrice : (s.avgBuyPrice || 0);
+    const gVal = s.totalGram * px;
+    if (gVal >= (s.cashUsdt || 0)) {
+      return { mode: "hold_gram", label: "بیشتر سرمایه‌ات GRAM است", action: "sell" };
+    }
+    return { mode: "hold_usdt", label: "بیشتر سرمایه‌ات تتر است", action: "buy" };
   }
   return { mode: "empty", label: "پوزیشن مشخصی نیست", action: null };
 }
@@ -417,35 +427,104 @@ export function buildAdvice(s, price, poolTonReserve = 1.7e6) {
   return { hint, meta: "مرجع = قیمت سواپ آخر (فروش)", rows, lastType: "sell", ref, suggest, breakEven: ref * pad, beExact: ref };
 }
 
+/**
+ * Trend phases for position-aware alerts:
+ *   rally          — قیمت مدام بالا می‌رود
+ *   dump           — قیمت مدام پایین می‌آید
+ *   reversal_down  — بعد از صعود، برگشت نزولی (سیگنال فروش فوری)
+ *   reversal_up    — بعد از نزول، برگشت صعودی (سیگنال خرید فوری)
+ *   flat           — بدون جهت واضح
+ *
+ * IMPORTANT: short-vs-medium conflict is treated as REVERSAL, not flat.
+ */
 export function detectMomentum(series) {
-  if (!series || series.length < 4) {
-    return { dir: "flat", delta: 0, from: null, to: null, noise: NOISE_FLOOR, medDir: "flat" };
-  }
-  const shortN = Math.min(series.length, 20);
-  const medN = Math.min(series.length, 60);
-  const short = series.slice(-shortN);
-  const med = series.slice(-medN);
-  const nAbs = noiseAbs(short[short.length - 1].p);
+  const empty = {
+    dir: "flat",
+    phase: "flat",
+    delta: 0,
+    from: null,
+    to: null,
+    noise: NOISE_FLOOR,
+    medDir: "flat",
+    prevDir: "flat",
+    strength: 0,
+    movePct: 0,
+  };
+  if (!series || series.length < 6) return empty;
+
+  const lastP = series[series.length - 1].p;
+  const nAbs = noiseAbs(lastP);
+  const shortN = Math.min(series.length, 16);
+  const prevN = Math.min(Math.max(0, series.length - shortN), 16);
+  const medN = Math.min(series.length, 48);
+
   function win(arr) {
-    const from = arr[0].p, to = arr[arr.length - 1].p, delta = to - from;
+    if (!arr || arr.length < 2) {
+      return { dir: "flat", delta: 0, from: null, to: null, movePct: 0 };
+    }
+    const from = arr[0].p;
+    const to = arr[arr.length - 1].p;
+    const delta = to - from;
     let up = 0, down = 0;
+    const step = nAbs * 0.45;
     for (let i = 1; i < arr.length; i++) {
       const d = arr[i].p - arr[i - 1].p;
-      if (d >= nAbs) up++;
-      else if (d <= -nAbs) down++;
+      if (d >= step) up++;
+      else if (d <= -step) down++;
     }
     let dir = "flat";
     if (Math.abs(delta) >= nAbs) {
       if (delta > 0 && up >= down) dir = "up";
       else if (delta < 0 && down >= up) dir = "down";
     }
-    return { dir, delta, from, to };
+    const movePct = from > 0 ? (delta / from) * 100 : 0;
+    return { dir, delta, from, to, movePct };
   }
-  const s = win(short), m = win(med);
-  let dir = s.dir;
-  if (s.dir !== "flat" && m.dir !== "flat" && s.dir !== m.dir) dir = "flat";
-  else if (s.dir === "flat" && m.dir !== "flat") dir = m.dir;
-  return { dir, delta: s.delta, from: s.from, to: s.to, noise: nAbs, medDir: m.dir };
+
+  const short = win(series.slice(-shortN));
+  const prev = prevN >= 4 ? win(series.slice(-(shortN + prevN), -shortN || undefined)) : { dir: "flat", delta: 0, movePct: 0 };
+  const med = win(series.slice(-medN));
+
+  let phase = "flat";
+  let dir = short.dir;
+
+  // Reversal first — this is the urgent trade signal
+  if (short.dir === "down" && Math.abs(short.delta) >= nAbs && (prev.dir === "up" || med.dir === "up")) {
+    phase = "reversal_down";
+    dir = "down";
+  } else if (short.dir === "up" && Math.abs(short.delta) >= nAbs && (prev.dir === "down" || med.dir === "down")) {
+    phase = "reversal_up";
+    dir = "up";
+  } else if (short.dir === "up" && (med.dir === "up" || prev.dir === "up" || med.dir === "flat")) {
+    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.4) {
+      phase = "rally";
+      dir = "up";
+    }
+  } else if (short.dir === "down" && (med.dir === "down" || prev.dir === "down" || med.dir === "flat")) {
+    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.4) {
+      phase = "dump";
+      dir = "down";
+    }
+  } else if (short.dir === "flat" && med.dir === "up") {
+    phase = "rally";
+    dir = "up";
+  } else if (short.dir === "flat" && med.dir === "down") {
+    phase = "dump";
+    dir = "down";
+  }
+
+  return {
+    dir,
+    phase,
+    delta: short.delta,
+    from: short.from,
+    to: short.to,
+    noise: nAbs,
+    medDir: med.dir,
+    prevDir: prev.dir,
+    strength: Math.abs(short.movePct || 0),
+    movePct: short.movePct || 0,
+  };
 }
 
 /** Reconcile note for UI */
