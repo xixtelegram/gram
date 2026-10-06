@@ -136,11 +136,23 @@ async function fetchWalletBalances(addr) {
 
 async function sendTelegram(text) {
   if (!TOKEN || !CHAT) throw new Error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing");
-  const url =
-    `https://api.telegram.org/bot${TOKEN}/sendMessage` +
-    `?chat_id=${encodeURIComponent(CHAT)}&text=${encodeURIComponent(text)}`;
-  const j = await fetchJson(url, 15000);
-  if (!j.ok) throw new Error(j.description || "telegram failed");
+  const body = new URLSearchParams();
+  body.set("chat_id", CHAT);
+  body.set("text", String(text == null ? "" : text).slice(0, 4096));
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: body.toString(),
+      signal: ctrl.signal,
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.ok === false) throw new Error(j.description || ("HTTP " + res.status));
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 /** Text + optional chart image (caption max ~1024 chars) */
@@ -148,17 +160,26 @@ async function sendTelegramPhoto(caption, photoUrl) {
   if (!TOKEN || !CHAT) throw new Error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing");
   if (!photoUrl) return sendTelegram(caption);
   const cap = String(caption || "").slice(0, 1024);
-  const url =
-    `https://api.telegram.org/bot${TOKEN}/sendPhoto` +
-    `?chat_id=${encodeURIComponent(CHAT)}` +
-    `&photo=${encodeURIComponent(photoUrl)}` +
-    `&caption=${encodeURIComponent(cap)}`;
+  const body = new URLSearchParams();
+  body.set("chat_id", CHAT);
+  body.set("photo", photoUrl);
+  body.set("caption", cap);
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 20000);
   try {
-    const j = await fetchJson(url, 20000);
-    if (!j.ok) throw new Error(j.description || "photo failed");
+    const res = await fetch(`https://api.telegram.org/bot${TOKEN}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: body.toString(),
+      signal: ctrl.signal,
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.ok === false) throw new Error(j.description || ("HTTP " + res.status));
   } catch (e) {
     console.warn("sendPhoto failed, fallback text:", e.message);
     await sendTelegram(caption);
+  } finally {
+    clearTimeout(t);
   }
 }
 
@@ -234,16 +255,15 @@ async function main() {
   const stance = positionStance(pos);
   const lt = lastTradeFromPos(pos);
   const quote = { source: priceInfo.source, dexUsd: priceInfo.dexUsd, cexUsd: priceInfo.cexUsd };
-  /** @type {{text:string, photo?:boolean}[]} */
+  /** @type {{text:string, photo?:boolean, key?:string}[]} */
   const msgs = [];
 
+  // Collect candidates first — mark only after a successful send
   if (ALERT_ABOVE != null && live >= ALERT_ABOVE && !recently(mem, "above")) {
-    mark(mem, "above");
-    msgs.push({ text: msgCeiling(ALERT_ABOVE, live, stanceText(pos, live)) });
+    msgs.push({ key: "above", text: msgCeiling(ALERT_ABOVE, live, stanceText(pos, live)) });
   }
   if (ALERT_BELOW != null && live <= ALERT_BELOW && !recently(mem, "below")) {
-    mark(mem, "below");
-    msgs.push({ text: msgFloor(ALERT_BELOW, live, stanceText(pos, live)) });
+    msgs.push({ key: "below", text: msgFloor(ALERT_BELOW, live, stanceText(pos, live)) });
   }
 
   if (lt && lt.price > 0) {
@@ -253,16 +273,14 @@ async function main() {
       for (const target of PROFIT_PCTS) {
         const key = "ls_profit_buy_" + target;
         if (movePct >= target && !recently(mem, key)) {
-          mark(mem, key);
-          msgs.push({ text: msgProfitBuy(movePct, target, ref, live, stanceText(pos, live)) });
+          msgs.push({ key, text: msgProfitBuy(movePct, target, ref, live, stanceText(pos, live)) });
           break;
         }
       }
       for (const loss of LOSS_PCTS) {
         const key = "ls_loss_buy_" + loss;
         if (movePct <= -loss && !recently(mem, key)) {
-          mark(mem, key);
-          msgs.push({ text: msgLossBuy(movePct, loss, ref, live, stanceText(pos, live)) });
+          msgs.push({ key, text: msgLossBuy(movePct, loss, ref, live, stanceText(pos, live)) });
           break;
         }
       }
@@ -270,16 +288,14 @@ async function main() {
       for (const target of PROFIT_PCTS) {
         const key = "ls_profit_sell_" + target;
         if (movePct <= -target && !recently(mem, key)) {
-          mark(mem, key);
-          msgs.push({ text: msgProfitSell(movePct, target, ref, live, stanceText(pos, live)) });
+          msgs.push({ key, text: msgProfitSell(movePct, target, ref, live, stanceText(pos, live)) });
           break;
         }
       }
       for (const loss of LOSS_PCTS) {
         const key = "ls_loss_sell_" + loss;
         if (movePct >= loss && !recently(mem, key)) {
-          mark(mem, key);
-          msgs.push({ text: msgLossSell(movePct, loss, ref, live, stanceText(pos, live)) });
+          msgs.push({ key, text: msgLossSell(movePct, loss, ref, live, stanceText(pos, live)) });
           break;
         }
       }
@@ -288,30 +304,26 @@ async function main() {
 
   if (mom.dir === "up" && stance.action === "sell" && !recently(mem, "mom_up_sell", COOL_MOM_MS)) {
     if (sellIsWorthwhile(pos, live, poolTonReserve)) {
-      mark(mem, "mom_up_sell");
-      msgs.push({ text: msgTrendUp(mom.from, live, mom.delta, stanceText(pos, live)) });
+      msgs.push({ key: "mom_up_sell", text: msgTrendUp(mom.from, live, mom.delta, stanceText(pos, live)) });
     }
   }
   if (mom.dir === "down" && stance.action === "sell" && !recently(mem, "mom_down_sell", COOL_MOM_MS)) {
     const drop = Math.abs(mom.delta);
     if (drop >= (mom.noise || noiseAbs(live))) {
-      mark(mem, "mom_down_sell");
-      msgs.push({ text: msgTrendDown(mom.from, live, drop, stanceText(pos, live)) });
+      msgs.push({ key: "mom_down_sell", text: msgTrendDown(mom.from, live, drop, stanceText(pos, live)) });
     }
   }
   if (mom.dir === "down" && stance.action === "buy" && !recently(mem, "mom_down_buy", COOL_MOM_MS)) {
     const drop = Math.abs(mom.delta);
     if (drop >= (mom.noise || noiseAbs(live)) && buyIsWorthwhile(pos, live, poolTonReserve)) {
-      mark(mem, "mom_down_buy");
-      msgs.push({ text: msgDrop(mom.from, live, drop, stanceText(pos, live)) });
+      msgs.push({ key: "mom_down_buy", text: msgDrop(mom.from, live, drop, stanceText(pos, live)) });
     }
   }
   if (mom.dir === "up" && stance.action === "buy" && !recently(mem, "mom_up_buy", COOL_MOM_MS)) {
     const ref = pos.lastSwapType === "sell" ? pos.lastSwapPrice : null;
     const chasing = ref != null && live > ref + (mom.noise || noiseAbs(live));
     if (!chasing && (buyIsWorthwhile(pos, live, poolTonReserve) || Math.abs(mom.delta) >= (mom.noise || noiseAbs(live)))) {
-      mark(mem, "mom_up_buy");
-      msgs.push({ text: msgBounce(mom.delta, live, stanceText(pos, live)) });
+      msgs.push({ key: "mom_up_buy", text: msgBounce(mom.delta, live, stanceText(pos, live)) });
     }
   }
 
@@ -329,6 +341,7 @@ async function main() {
     out = [status];
   }
 
+  // Always persist price series; cooldown marks only after successful send
   saveState(mem);
   if (!out.length) {
     console.log("No alerts to send (no threshold; scheduled without REPORT)");
@@ -336,12 +349,20 @@ async function main() {
   }
 
   const chart = statusChartUrl(series, live);
+  let sent = 0;
   for (const m of out) {
     console.log("Sending:", m.text.slice(0, 120).replace(/\n/g, " | "));
-    if (m.photo && chart) await sendTelegramPhoto(m.text, chart);
-    else await sendTelegram(m.text);
+    try {
+      if (m.photo && chart) await sendTelegramPhoto(m.text, chart);
+      else await sendTelegram(m.text);
+      if (m.key) mark(mem, m.key);
+      sent++;
+    } catch (e) {
+      console.error("Send failed:", e.message || e);
+    }
   }
-  console.log(`Sent ${out.length} message(s)`);
+  saveState(mem);
+  console.log(`Sent ${sent}/${out.length} message(s)`);
 }
 
 main().catch((e) => {
