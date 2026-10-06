@@ -1,22 +1,21 @@
 /**
- * GRAM — ماژول متن پیام‌های تلگرام
- * فقط کپی و ساختار پیام؛ منطق قیمت/پوزیشن در gram-core و app/ton-alert است.
+ * GRAM — تنها منبع متن‌های کاربر (تلگرام + UI پیشنهاد)
  *
- * بخش‌ها:
- *   1) utils     — درصد، قالب عدد
- *   2) situation — وضعیت پوزیشن (عنوان + درصد + مبنا)
- *   3) advice    — پیشنهاد کار مشخص برای کاربر
- *   4) targets   — لیست قیمت‌های هدف
- *   5) status    — گزارش کامل دوره‌ای
- *   6) alerts    — سقف/کف/سود/ضرر + فازهای روند (آماده‌باش / فوری)
- *   7) chart     — لینک چارت وضعیت
+ * همهٔ کپی فارسی اینجا است. app / ton-alert فقط از این فایل import کنند.
+ * gram-core نباید متن فارسی داشته باشد (فقط عدد و منطق).
  */
 
-import { ROUND, fmt, estSlippagePct } from "./gram-core.mjs";
+import {
+  ROUND,
+  MIN_ACTION_PCT,
+  fmt,
+  estSlippagePct,
+  estExecSellPrice,
+  estExecBuyPrice,
+  positionStance,
+} from "./gram-core.mjs";
 
-// ─────────────────────────────────────────────
-// 1) utils
-// ─────────────────────────────────────────────
+// ─── utils ───
 
 export function formatPctSigned(pct) {
   if (pct == null || !Number.isFinite(pct)) return "—";
@@ -33,19 +32,38 @@ function priceLine(label, value) {
   return label + ": " + (value != null && Number.isFinite(Number(value)) ? fmt(value, 4) : "—");
 }
 
-/** پاورقی کوتاه زیر هشدار — بدون تکرار عنوان طولانی */
 function footer(stanceText) {
   if (!stanceText || !String(stanceText).trim()) return "";
   return "\n\n────────\n" + String(stanceText).trim();
 }
 
-// ─────────────────────────────────────────────
-// 2) situation — کاربر الان کجاست؟
-// ─────────────────────────────────────────────
+export const ADVICE_LEVELS = [
+  { pct: 0.5, tag: "کمی" },
+  { pct: 1, tag: "بهتر" },
+  { pct: 2, tag: "خوب" },
+  { pct: 3, tag: "خیلی خوب" },
+  { pct: 5, tag: "عالی" },
+];
 
-/**
- * @returns {{ emoji: string, title: string, pct: number|null, kind: string, basis: string|null }}
- */
+// ─── stance labels ───
+
+const STANCE_LABELS = {
+  hold_gram: "بیشتر سرمایه‌ات GRAM است",
+  hold_usdt: "بیشتر سرمایه‌ات تتر است",
+  empty: "پوزیشن مشخصی نیست",
+};
+
+export function stanceLabel(mode) {
+  return STANCE_LABELS[mode] || STANCE_LABELS.empty;
+}
+
+export function stanceOf(s, livePrice = null) {
+  const st = positionStance(s, livePrice);
+  return { ...st, label: stanceLabel(st.mode) };
+}
+
+// ─── situation ───
+
 export function pnlHeadline(s, price, lastTrade) {
   if (!price) {
     return { emoji: "⚪", title: "قیمت هنوز مشخص نیست", pct: null, kind: "unknown", basis: null };
@@ -60,7 +78,6 @@ export function pnlHeadline(s, price, lastTrade) {
   }
 
   const lt = lastTrade;
-
   if (lt && lt.type === "sell" && lt.price > 0) {
     const pct = ((price - lt.price) / lt.price) * 100;
     const basis = "قیمت آخرین فروشت: " + fmt(lt.price, 4);
@@ -86,50 +103,108 @@ export function pnlHeadline(s, price, lastTrade) {
   };
 }
 
-// ─────────────────────────────────────────────
-// 3) advice — الان چه کار کنی؟
-// ─────────────────────────────────────────────
+// ─── advice ───
 
 export function actionAdvice(s, price, hl, checks) {
   if (!price) return "صبر کن تا قیمت درست لود شود.";
-
   if (hl.kind === "profit" && s.totalGram > 1e-6) {
-    if (checks.sellIsWorthwhile(s, price)) {
+    if (checks && checks.sellIsWorthwhile(s, price)) {
       return "پیشنهاد: فروش را بررسی کن. (با فروش واقعی ممکن است کمی کمتر از این عدد بگیری.)";
     }
     return "پیشنهاد: فعلاً نگه دار؛ برای فروش بهتر صبر کن تا به هدف‌های پایین برسد.";
   }
-
   if (hl.kind === "loss" && s.totalGram > 1e-6) {
     return "پیشنهاد: عجله نکن. تا نفروشی ضرر فقط روی کاغذ است.";
   }
-
   if (hl.kind === "opportunity") {
-    if (checks.buyIsWorthwhile(s, price)) {
+    if (checks && checks.buyIsWorthwhile(s, price)) {
       return "پیشنهاد: نسبت به فروشت ارزان‌تر شده — خرید را بررسی کن.";
     }
     return "پیشنهاد: کمی ارزان شده؛ هنوز برای خرید عجله نکن.";
   }
-
-  if (hl.kind === "missed") {
-    return "پیشنهاد: الان نخر. صبر کن قیمت دوباره نزدیک فروشت شود.";
-  }
-
-  if (hl.kind === "unknown") {
-    return "پیشنهاد: اول تاریخچه سواپ یا کیف‌پول را وصل کن.";
-  }
-
+  if (hl.kind === "missed") return "پیشنهاد: الان نخر. صبر کن قیمت دوباره نزدیک فروشت شود.";
+  if (hl.kind === "unknown") return "پیشنهاد: اول تاریخچه سواپ یا کیف‌پول را وصل کن.";
   return "پیشنهاد: شرایط عادی است — معامله عجولانه لازم نیست.";
 }
 
-// ─────────────────────────────────────────────
-// 4) targets — قیمت هدف ساده
-// ─────────────────────────────────────────────
+/** کارت پیشنهاد UI — تنها منبع متن hint/rows */
+export function buildAdvice(s, price, lastTrade, poolTonReserve = 1.7e6) {
+  const lt = lastTrade;
+  const pad = 1 - ROUND / 100;
+  if (!lt || !(lt.price > 0)) {
+    return {
+      hint: "هنوز سواپی ثبت نشده — همگام‌سازی کیف‌پول را بزن",
+      meta: "",
+      rows: [],
+      lastType: null,
+      ref: null,
+      suggest: null,
+      breakEven: null,
+      beExact: null,
+    };
+  }
+
+  const ref = lt.price;
+  const rows = [];
+
+  if (lt.type === "buy") {
+    const curPct = price > 0 ? ((price - ref) / ref) * 100 : null;
+    const exec = price > 0 && s.totalGram > 0 ? estExecSellPrice(price, s.totalGram, poolTonReserve) : null;
+    const execPct = exec != null ? ((exec - ref) / ref) * 100 : null;
+
+    let hint = "آخرین سواپ: خرید GRAM @ " + fmt(ref, 4);
+    if (curPct != null) {
+      hint += "\nقیمت الان: " + fmt(price, 4) + " → " + (curPct >= 0 ? "سود " : "ضرر ") + Math.abs(curPct).toFixed(2) + "٪ نسبت به خرید";
+    }
+    if (execPct != null) {
+      hint += "\nبا هزینه معامله تقریبی: " + fmt(exec, 4) + " (" + (execPct >= 0 ? "+" : "") + execPct.toFixed(2) + "٪)";
+    }
+
+    for (const L of ADVICE_LEVELS) {
+      const slip = s.totalGram > 0 ? estSlippagePct(s.totalGram, poolTonReserve) / 100 : 0;
+      const midForExec = (ref * (1 + L.pct / 100)) / Math.max(0.5, 1 - slip) / pad;
+      rows.push({
+        label: "فروش +" + L.pct + "٪",
+        price: midForExec,
+        detail: L.tag + " — وقتی قیمت نزدیک " + fmt(midForExec, 4) + " شد حدود +" + L.pct + "٪ سود می‌ماند",
+      });
+    }
+
+    const suggest = execPct != null && execPct >= MIN_ACTION_PCT ? "to_usdt" : null;
+    if (suggest) hint += "\n✅ بعد از هزینه معامله در سود معناداری هستی — می‌توانی فروش را بررسی کنی";
+    else if (curPct != null && curPct < 0) hint += "\nمنتظر برگشت بالای " + fmt(ref, 4) + " بمان";
+    else hint += "\nبرای فروش بهتر صبر کن تا به هدف‌های زیر نزدیک شود";
+
+    return { hint, meta: "مرجع = قیمت آخرین خرید", rows, lastType: "buy", ref, suggest, breakEven: ref / pad, beExact: ref };
+  }
+
+  const curPct = price > 0 ? ((ref - price) / ref) * 100 : null;
+  let hint = "آخرین سواپ: فروش GRAM @ " + fmt(ref, 4);
+  if (curPct != null) {
+    hint += "\nقیمت الان: " + fmt(price, 4) + " → " + (curPct >= 0 ? curPct.toFixed(2) + "٪ ارزان‌تر از فروش" : Math.abs(curPct).toFixed(2) + "٪ گران‌تر از فروش");
+  }
+
+  for (const L of ADVICE_LEVELS) {
+    const target = ref * (1 - L.pct / 100) * pad;
+    rows.push({
+      label: "خرید −" + L.pct + "٪",
+      price: target,
+      detail: L.tag + " — زیر " + fmt(target, 4) + " نسبت به فروش آخر حدود +" + L.pct + "٪ جا برای دور بعد",
+    });
+  }
+
+  const suggest = curPct != null && curPct >= MIN_ACTION_PCT ? "to_gram" : null;
+  if (suggest) hint += "\n✅ نسبت به فروش آخر ارزان‌تر شده — می‌توانی دوباره بخری";
+  else hint += "\nعجله نکن — منتظر نزدیک شدن به هدف‌های خرید زیر بمان";
+
+  return { hint, meta: "مرجع = قیمت آخرین فروش", rows, lastType: "sell", ref, suggest, breakEven: ref * pad, beExact: ref };
+}
+
+// ─── targets ───
 
 export function targetsBlock(s, lastTrade, poolReserve) {
   const lt = lastTrade;
   if (!lt || !(lt.price > 0)) return "";
-
   const ref = lt.price;
   const pad = 1 - ROUND / 100;
   const levels = [
@@ -138,7 +213,6 @@ export function targetsBlock(s, lastTrade, poolReserve) {
     { pct: 3, tag: "۳٪" },
     { pct: 5, tag: "۵٪" },
   ];
-
   let out = "";
   if (lt.type === "buy") {
     out += "\n\nاگر بخواهی بفروشی، این قیمت‌ها را در نظر بگیر:";
@@ -157,34 +231,43 @@ export function targetsBlock(s, lastTrade, poolReserve) {
   return out;
 }
 
-// ─────────────────────────────────────────────
-// خلاصه وضعیت (برای پاورقی هشدارها و UI)
-// ─────────────────────────────────────────────
+// ─── stanceLine ───
 
 export function stanceLine(s, price, lastTrade, checks) {
+  const st = stanceOf(s, price);
   const hl = pnlHeadline(s, price, lastTrade);
-  let line = hl.emoji + " " + hl.title;
+  let line = st.label;
+  line += "\n" + hl.emoji + " " + hl.title;
   if (hl.pct != null) line += "  " + formatPctSigned(hl.pct);
   if (hl.basis) line += "\n" + hl.basis;
   line += "\n" + actionAdvice(s, price, hl, checks);
   return line;
 }
 
-// ─────────────────────────────────────────────
-// 5) status — گزارش کامل
-// ─────────────────────────────────────────────
+export function lastSwapAdviceBlock(s, price, lastTrade, poolReserve = 1.7e6) {
+  const adv = buildAdvice(s, price, lastTrade, poolReserve);
+  if (!adv.lastType) return "\n\n" + adv.hint;
+  let out = "\n\n" + adv.hint;
+  if (adv.rows && adv.rows.length) {
+    out += adv.lastType === "buy" ? "\n\nاهداف فروش:" : "\n\nاهداف خرید:";
+    for (const r of adv.rows) out += "\n• " + r.label + " → " + fmt(r.price, 4);
+  }
+  return out;
+}
+
+// ─── status ───
 
 export function buildStatusMessage(s, live, quote, lastTrade, checks, poolReserve) {
   const price = live;
   const hl = pnlHeadline(s, price, lastTrade);
+  const st = stanceOf(s, price);
 
   let msg = "📊 گزارش وضعیت GRAM\n\n";
-
+  msg += st.label + "\n";
   msg += hl.emoji + " " + hl.title;
   if (hl.pct != null) msg += "  " + formatPctSigned(hl.pct);
   msg += "\n";
   if (hl.basis) msg += hl.basis + "\n";
-
   msg += "\n" + priceLine("قیمت الان", price);
   if (quote && quote.source) msg += "  (" + quote.source + ")";
 
@@ -193,19 +276,14 @@ export function buildStatusMessage(s, live, quote, lastTrade, checks, poolReserv
   if (s.totalGram > 1e-6) bits.push(fmt(s.totalGram, 4) + " GRAM");
   if (bits.length) msg += "\nدارایی تو: " + bits.join("  ·  ");
   if (s.equity) msg += "\nارزش تقریبی: " + fmt(s.equity, 2) + " USDT";
-
   msg += "\n\n" + actionAdvice(s, price, hl, checks);
-
-  if (hl.kind === "profit" || hl.kind === "loss" || hl.kind === "opportunity" || hl.kind === "missed" || hl.kind === "flat") {
+  if (["profit", "loss", "opportunity", "missed", "flat"].includes(hl.kind)) {
     msg += targetsBlock(s, lastTrade, poolReserve);
   }
-
   return msg;
 }
 
-// ─────────────────────────────────────────────
-// 6) alerts
-// ─────────────────────────────────────────────
+// ─── alerts ───
 
 export function msgCeiling(above, live, stanceText) {
   return (
@@ -280,7 +358,6 @@ export function msgLossSell(movePct, lossPct, ref, live, stanceText) {
   );
 }
 
-/** GRAM داری + صعود ادامه دارد → آماده‌باش */
 export function msgRallyPrepare(from, live, movePct, stanceText) {
   return (
     "📈 GRAM داره رشد می‌کنه — آماده باش\n\n" +
@@ -293,7 +370,6 @@ export function msgRallyPrepare(from, live, movePct, stanceText) {
   );
 }
 
-/** GRAM داری + برگشت از صعود به نزول → فروش فوری */
 export function msgReversalSell(from, live, drop, movePct, stanceText) {
   return (
     "🚨 ریزش بعد از رشد — زود فروش را بررسی کن\n\n" +
@@ -306,7 +382,6 @@ export function msgReversalSell(from, live, drop, movePct, stanceText) {
   );
 }
 
-/** تتر داری + نزول ادامه دارد → حواس‌جمع برای خرید */
 export function msgDumpWatch(from, live, movePct, stanceText) {
   return (
     "📉 قیمت داره می‌ریزه — حواست به خرید باشد\n\n" +
@@ -319,7 +394,6 @@ export function msgDumpWatch(from, live, movePct, stanceText) {
   );
 }
 
-/** تتر داری + برگشت از نزول به صعود → خرید فوری */
 export function msgReversalBuy(from, live, movePct, stanceText) {
   return (
     "🚨 برگشت رو به بالا — قبل از گرون شدن خرید را بررسی کن\n\n" +
@@ -332,7 +406,6 @@ export function msgReversalBuy(from, live, movePct, stanceText) {
   );
 }
 
-/** سازگاری با نام‌های قدیمی */
 export function msgTrendUp(from, live, delta, stanceText) {
   const movePct = from > 0 ? (Math.abs(delta) / from) * 100 : 0;
   return msgRallyPrepare(from, live, movePct, stanceText);
@@ -361,14 +434,15 @@ export function msgConnected() {
   );
 }
 
-// ─────────────────────────────────────────────
-// 7) chart
-// ─────────────────────────────────────────────
+export function reconcileNote(s) {
+  if (!s || !s.fromWallet) return "بعد از همگام‌سازی، موجودی از کیف‌پول خوانده می‌شود.";
+  const d = Math.abs((s.bookGram || 0) - (s.totalGram || 0));
+  if (d > 0.5) {
+    return "✓ موجودی از کیف‌پول · دفتر سواپ‌ها " + fmt(s.bookGram, 4) + " GRAM (اختلاف " + fmt(d, 4) + " احتمالاً واریز/برداشت غیرسواپ یا تاریخچه ناقص)";
+  }
+  return "✓ موجودی از کیف‌پول · دفتر سواپ با زنجیره هم‌خوان است";
+}
 
-/**
- * @param {Array<{t?:number,p:number}>} series
- * @param {number|null} live
- */
 export function statusChartUrl(series, live) {
   const pts = Array.isArray(series) ? series.map((x) => Number(x.p)).filter((n) => Number.isFinite(n)) : [];
   if (live != null && Number.isFinite(live)) pts.push(Number(live));
