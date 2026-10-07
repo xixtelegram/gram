@@ -430,8 +430,131 @@ export function msgConnected() {
     "از این به بعد هشدارها و گزارش‌های GRAM همین‌جا می‌آید.\n" +
     "منطق پیام‌ها:\n" +
     "• اگر GRAM داری → رشد = آماده‌باش، برگشت نزولی = خبر فروش\n" +
-    "• اگر تتر داری → ریزش = حواس‌جمع، برگشت صعودی = خبر خرید"
+    "• اگر تتر داری → ریزش = حواس‌جمع، برگشت صعودی = خبر خرید\n" +
+    "• سقف/کف بازه‌های ۲۴س تا ۱سال + حد ضرر از میانگین خرید"
   );
+}
+
+/** Stop-loss vs average entry */
+export function msgStopLoss(pct, avg, live, stanceText) {
+  return (
+    "🛑 حد ضرر — قیمت از میانگین خریدت فاصله گرفته\n\n" +
+    "ضرر تحقق‌نیافته حدود " + formatPctSigned(pct) + "\n" +
+    priceLine("میانگین خرید", avg) + "\n" +
+    priceLine("قیمت الان", live) + "\n\n" +
+    "چون هنوز GRAM داری: این فقط هشدار مدیریت ریسک است.\n" +
+    "اگر از قبل حد ضرر مشخص کرده بودی، فروش را جدی بررسی کن.\n" +
+    "اگر برنامه بلندمدت داری، عجله لازم نیست — ولی سایز پوزیشن را مرور کن." +
+    footer(stanceText)
+  );
+}
+
+/** Near period high (24h … 1y) */
+export function msgRangeNearHigh(ex, stanceText) {
+  const posPct = ex.posInRange != null ? (ex.posInRange * 100).toFixed(0) : "—";
+  return (
+    "📍 نزدیک سقف بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
+    "قیمت الان در حدود " + posPct + "٪ بالای دامنهٔ این بازه است.\n" +
+    priceLine("سقف بازه", ex.high) + "\n" +
+    priceLine("کف بازه", ex.low) + "\n" +
+    priceLine("قیمت الان", ex.live) + "\n\n" +
+    (ex.fromHighPct != null ? "فاصله از سقف: " + formatPctSigned(ex.fromHighPct) + "\n\n" : "") +
+    "اگر بیشتر سرمایه‌ات GRAM است → فروش جزئی یا حد سود را بررسی کن.\n" +
+    "رسیدن به سقف تاریخی بازه یعنی فضای رشد کوتاه‌مدت محدودتر شده." +
+    footer(stanceText)
+  );
+}
+
+/** Near period low */
+export function msgRangeNearLow(ex, stanceText) {
+  const posPct = ex.posInRange != null ? (ex.posInRange * 100).toFixed(0) : "—";
+  return (
+    "📍 نزدیک کف بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
+    "قیمت الان در حدود " + posPct + "٪ دامنهٔ این بازه است (نزدیک کف).\n" +
+    priceLine("سقف بازه", ex.high) + "\n" +
+    priceLine("کف بازه", ex.low) + "\n" +
+    priceLine("قیمت الان", ex.live) + "\n\n" +
+    (ex.fromLowPct != null ? "فاصله از کف: " + formatPctSigned(ex.fromLowPct) + "\n\n" : "") +
+    "اگر بیشتر سرمایه‌ات تتر است → خرید پله‌ای را بررسی کن.\n" +
+    "نزدیک کف بازه معمولاً نقطهٔ جذاب‌تری برای ورود است تا وسط دامنه." +
+    footer(stanceText)
+  );
+}
+
+/** Violent drop relative to period range */
+export function msgRangeViolentDrop(ex, stanceText) {
+  const vs = ex.moveVsRange != null ? (ex.moveVsRange * 100).toFixed(0) : "—";
+  return (
+    "⚡ ریزش تند نسبت به بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
+    "حرکت اخیر حدود " + vs + "٪ از کل دامنهٔ این بازه را پوشش داده.\n" +
+    priceLine("سقف بازه", ex.high) + "\n" +
+    priceLine("کف بازه", ex.low) + "\n" +
+    priceLine("قیمت الان", ex.live) + "\n\n" +
+    "این نوع حرکت «غیرعادی نسبت به همان بازه» است.\n" +
+    "اگر تتر داری → عجله نکن؛ صبر برای تثبیت یا برگشت منطقی‌تر است.\n" +
+    "اگر GRAM داری → سایز و حد ضرر را مرور کن." +
+    footer(stanceText)
+  );
+}
+
+/** Violent rally relative to period range */
+export function msgRangeViolentRally(ex, stanceText) {
+  const vs = ex.moveVsRange != null ? (ex.moveVsRange * 100).toFixed(0) : "—";
+  return (
+    "⚡ رشد تند نسبت به بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
+    "حرکت اخیر حدود " + vs + "٪ از کل دامنهٔ این بازه را پوشش داده.\n" +
+    priceLine("سقف بازه", ex.high) + "\n" +
+    priceLine("کف بازه", ex.low) + "\n" +
+    priceLine("قیمت الان", ex.live) + "\n\n" +
+    "رشد تند نسبت به بازه معمولاً ناپایدار است.\n" +
+    "اگر GRAM داری → سود جزئی یا جابه‌جایی به تتر را بررسی کن.\n" +
+    "اگر تتر داری → تعقیب قیمت بعد از چنین رشدی ریسک بالاتری دارد." +
+    footer(stanceText)
+  );
+}
+
+/**
+ * Map evaluateAlerts() item → Persian text.
+ * @param {object} alert from evaluateAlerts
+ * @param {string} stanceText
+ */
+export function renderAlertMessage(alert, stanceText) {
+  if (!alert) return "";
+  const p = alert.payload || {};
+  switch (alert.type) {
+    case "stop_loss":
+      return msgStopLoss(p.pct, p.avg, p.live, stanceText);
+    case "reversal_sell":
+      return msgReversalSell(p.from, p.live, p.delta, p.movePct, stanceText);
+    case "reversal_buy":
+      return msgReversalBuy(p.from, p.live, p.movePct, stanceText);
+    case "ceiling":
+      return msgCeiling(p.level, p.live, stanceText);
+    case "floor":
+      return msgFloor(p.level, p.live, stanceText);
+    case "profit_buy":
+      return msgProfitBuy(p.vsSwap, p.target, p.ref, p.live, stanceText);
+    case "loss_buy":
+      return msgLossBuy(p.vsSwap, p.loss, p.ref, p.live, stanceText);
+    case "profit_sell":
+      return msgProfitSell(p.vsSwap, p.target, p.ref, p.live, stanceText);
+    case "loss_sell":
+      return msgLossSell(p.vsSwap, p.loss, p.ref, p.live, stanceText);
+    case "rally_prepare":
+      return msgRallyPrepare(p.from, p.live, p.movePct, stanceText);
+    case "dump_watch":
+      return msgDumpWatch(p.from, p.live, p.movePct, stanceText);
+    case "range_near_high":
+      return msgRangeNearHigh(p, stanceText);
+    case "range_near_low":
+      return msgRangeNearLow(p, stanceText);
+    case "range_violent_drop":
+      return msgRangeViolentDrop(p, stanceText);
+    case "range_violent_rally":
+      return msgRangeViolentRally(p, stanceText);
+    default:
+      return "هشدار: " + (alert.type || alert.key || "?") + footer(stanceText);
+  }
 }
 
 export function reconcileNote(s) {
