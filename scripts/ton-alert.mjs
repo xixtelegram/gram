@@ -30,6 +30,7 @@ import {
   normalizePriceSeries,
   evaluateAlerts,
   cooldownFor,
+  cooldownKeys,
   noiseAbs,
   fmt,
   num,
@@ -40,6 +41,7 @@ import {
   stanceOf,
   buildStatusMessage,
   renderAlertMessage,
+  alertStanceFooter,
   statusChartUrl,
 } from "./telegram-messages.mjs";
 
@@ -347,13 +349,18 @@ async function main() {
 
   const ready = candidates.filter((a) => {
     const cool = cooldownFor(a, STRATEGY);
-    if (recently(mem, a.key, cool)) return false;
+    // Family-level cooldown: any key in cooldownKeys blocks the alert
+    for (const k of cooldownKeys(a)) {
+      if (recently(mem, k, cool)) return false;
+    }
     return true;
   });
 
-  const st = () => stanceText(pos, live);
+  // Short footer aligned with position — avoids contradictory "ضرر روی کاغذ" under buy alerts
+  const st = () => alertStanceFooter(pos, live);
   const msgs = ready.map((a) => ({
     key: a.key,
+    family: a.family,
     urgent: !!a.urgent,
     text: renderAlertMessage(a, st()),
     priority: a.priority,
@@ -394,17 +401,20 @@ async function main() {
   let sent = 0;
   for (const m of out) {
     console.log((dryRun ? "[DRY] " : "") + "Sending:", (m.type || m.key || "") + " | " + m.text.slice(0, 100).replace(/\n/g, " · "));
+    const markAll = () => {
+      for (const k of cooldownKeys(m)) mark(mem, k);
+    };
     if (dryRun) {
-      if (m.key) mark(mem, m.key);
+      markAll();
       sent++;
       continue;
     }
     try {
       if (m.photo && chart) await sendTelegramPhoto(m.text, chart);
       else await sendTelegram(m.text);
-      if (m.key) mark(mem, m.key);
+      markAll();
       sent++;
-      logEvent({ event: "sent", key: m.key, type: m.type, urgent: !!m.urgent });
+      logEvent({ event: "sent", key: m.key, family: m.family, type: m.type, urgent: !!m.urgent });
     } catch (e) {
       console.error("Send failed:", e.message || e);
       logEvent({ event: "send_failed", key: m.key, error: String(e.message || e) });
