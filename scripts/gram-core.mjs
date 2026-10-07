@@ -67,7 +67,9 @@ export const DEFAULT_STRATEGY = Object.freeze({
     rangeMove: 30 * 60 * 1000,
     stop: 60 * 60 * 1000,
     level: 20 * 60 * 1000,
-    profit: 20 * 60 * 1000,
+    /** Same profit/loss event must not re-fire for hours (prevents 1.5→2→2.5 spam) */
+    profit: 3 * 60 * 60 * 1000,
+    loss: 3 * 60 * 60 * 1000,
   }),
 });
 
@@ -839,59 +841,71 @@ export function evaluateAlerts(ctx) {
   }
 
   // 4) Profit / loss vs last swap (position-aligned)
+  // IMPORTANT: only ONE alert per family — the strongest crossed threshold.
+  // Otherwise 1.5% then 2% then 2.5% spam every few minutes on the same move.
   if (lt && lt.price > 0) {
     const ref = lt.price;
     const vsSwap = ((live - ref) / ref) * 100;
+    const profits = (profitPcts || []).slice().filter((x) => x > 0).sort((a, b) => a - b);
+    const losses = (lossPcts || []).slice().filter((x) => x > 0).sort((a, b) => a - b);
+
     if (stance.action === "sell" && lt.type === "buy") {
-      for (const target of profitPcts) {
-        if (vsSwap >= target) {
-          push({
-            key: "ls_profit_buy_" + target,
-            family: "profit",
-            type: "profit_buy",
-            priority: 3,
-            payload: { vsSwap, target, ref, live, stance },
-          });
-          break;
-        }
+      // highest profit target that price has already reached
+      let bestProfit = null;
+      for (const target of profits) {
+        if (vsSwap >= target) bestProfit = target;
       }
-      for (const loss of lossPcts) {
-        if (vsSwap <= -loss) {
-          push({
-            key: "ls_loss_buy_" + loss,
-            family: "loss",
-            type: "loss_buy",
-            priority: 3,
-            payload: { vsSwap, loss, ref, live, stance },
-          });
-          break;
-        }
+      if (bestProfit != null) {
+        push({
+          key: "ls_profit_buy",
+          family: "profit",
+          type: "profit_buy",
+          priority: 3,
+          payload: { vsSwap, target: bestProfit, ref, live, stance },
+        });
+      }
+      // deepest loss threshold crossed
+      let bestLoss = null;
+      for (const loss of losses) {
+        if (vsSwap <= -loss) bestLoss = loss;
+      }
+      if (bestLoss != null) {
+        push({
+          key: "ls_loss_buy",
+          family: "loss",
+          type: "loss_buy",
+          priority: 3,
+          payload: { vsSwap, loss: bestLoss, ref, live, stance },
+        });
       }
     }
     if (stance.action === "buy" && lt.type === "sell") {
-      for (const target of profitPcts) {
-        if (vsSwap <= -target) {
-          push({
-            key: "ls_profit_sell_" + target,
-            family: "profit",
-            type: "profit_sell",
-            priority: 3,
-            payload: { vsSwap, target, ref, live, stance },
-          });
-          break;
-        }
+      // strongest "cheaper than sell" target (most negative vsSwap)
+      let bestProfit = null;
+      for (const target of profits) {
+        if (vsSwap <= -target) bestProfit = target;
       }
-      for (const loss of lossPcts) {
-        if (vsSwap >= loss) {
-          push({
-            key: "ls_loss_sell_" + loss,
-            family: "loss",
-            type: "loss_sell",
-            priority: 3,
-            payload: { vsSwap, loss, ref, live, stance },
-          });
-          break;
-        }
+      if (bestProfit != null) {
+        push({
+          key: "ls_profit_sell",
+          family: "profit",
+          type: "profit_sell",
+          priority: 3,
+          payload: { vsSwap, target: bestProfit, ref, live, stance },
+        });
+      }
+      let bestLoss = null;
+      for (const loss of losses) {
+        if (vsSwap >= loss) bestLoss = loss;
+      }
+      if (bestLoss != null) {
+        push({
+          key: "ls_loss_sell",
+          family: "loss",
+          type: "loss_sell",
+          priority: 3,
+          payload: { vsSwap, loss: bestLoss, ref, live, stance },
+        });
       }
     }
   }
@@ -943,6 +957,19 @@ export function cooldownFor(alert, cfg = DEFAULT_STRATEGY) {
   if (fam === "range_low") return c.rangeLow;
   if (fam === "range_move") return c.rangeMove;
   if (fam === "level") return c.level;
-  if (fam === "profit" || fam === "loss") return c.profit;
+  if (fam === "profit") return c.profit != null ? c.profit : 3 * 60 * 60 * 1000;
+  if (fam === "loss") return c.loss != null ? c.loss : c.profit != null ? c.profit : 3 * 60 * 60 * 1000;
   return c.level;
+}
+
+/**
+ * Keys to check/mark for cooldown.
+ * Always includes family key so threshold cascades (1.5→2→2.5) cannot spam.
+ */
+export function cooldownKeys(alert) {
+  if (!alert) return [];
+  const keys = [];
+  if (alert.key) keys.push(String(alert.key));
+  if (alert.family) keys.push("fam_" + alert.family);
+  return keys;
 }
