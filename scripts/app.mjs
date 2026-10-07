@@ -750,9 +750,15 @@ function drawChart(pts, avg) {
   ctx.fillStyle = g; ctx.fill();
 }
 
+/**
+ * Send Telegram from the browser.
+ * api.telegram.org has no CORS — readable responses often fail.
+ * Strategy: normal POST → auth errors bubble → fire-and-forget fallbacks
+ * (no-cors POST, sendBeacon, Image GET) so the message still arrives.
+ */
 function sendTelegram(text) {
   const token = (tg.token || "").trim(), chat = (tg.chatId || "").trim();
-  if (!token || !chat) return Promise.reject(new Error("توکن و Chat ID لازم است"));
+  if (!token || !chat) return Promise.reject(new Error("توکن و Chat ID لازم است — هر دو را پر کن"));
   const bodyText = String(text == null ? "" : text).slice(0, 4096);
   if (!bodyText) return Promise.reject(new Error("پیام خالی است"));
   const api = "https://api.telegram.org/bot" + token + "/sendMessage";
@@ -761,7 +767,34 @@ function sendTelegram(text) {
   form.set("text", bodyText);
   const formBody = form.toString();
 
-  // POST avoids URL length limits and keeps token out of the query string
+  function isAuthError(msg) {
+    return /unauthorized|not found|chat not found|forbidden|bot token|invalid token|wrong/i.test(msg);
+  }
+
+  function fireAndForget() {
+    try {
+      fetch(api, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: formBody,
+      }).catch(function () {});
+    } catch (_) {}
+    try {
+      if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+        navigator.sendBeacon(api, new Blob([formBody], { type: "application/x-www-form-urlencoded" }));
+      }
+    } catch (_) {}
+    if (bodyText.length <= 2000) {
+      try {
+        const getUrl = api + "?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(bodyText);
+        const img = new Image();
+        img.src = getUrl;
+      } catch (_) {}
+    }
+    return true;
+  }
+
   return fetch(api, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -778,31 +811,18 @@ function sendTelegram(text) {
     })
     .catch((err) => {
       const msg = String((err && err.message) || err || "");
-      // Real API / auth errors we could read — surface them
-      if (/unauthorized|not found|chat not found|forbidden|bot token|HTTP [4-5]|ناموفق|لازم است|too long|message is too long/i.test(msg)) {
-        return Promise.reject(err instanceof Error ? err : new Error(msg));
+      if (isAuthError(msg)) {
+        return Promise.reject(new Error(
+          /unauthorized|invalid token|bot token/i.test(msg)
+            ? "توکن ربات اشتباه است"
+            : /chat not found|forbidden/i.test(msg)
+              ? "Chat ID اشتباه است یا ربات را استارت نکرده‌ای"
+              : msg
+        ));
       }
-      // Likely CORS (browser cannot read api.telegram.org). Fire-and-forget still delivers.
-      try {
-        if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
-          if (navigator.sendBeacon(api, new Blob([formBody], { type: "application/x-www-form-urlencoded" }))) {
-            return true;
-          }
-        }
-      } catch (_) {}
-      // Short-message GET fallback: Telegram processes the request even if response is unreadable
-      if (bodyText.length <= 1500) {
-        const getUrl = api + "?chat_id=" + encodeURIComponent(chat) + "&text=" + encodeURIComponent(bodyText);
-        return new Promise((resolve) => {
-          const img = new Image();
-          let done = false;
-          const finish = () => { if (!done) { done = true; resolve(true); } };
-          img.onload = img.onerror = finish;
-          img.src = getUrl;
-          setTimeout(finish, 2000);
-        });
-      }
-      return Promise.reject(err instanceof Error ? err : new Error(msg || "ارسال ناموفق"));
+      // CORS / network: delivery via fallbacks (common in browsers)
+      fireAndForget();
+      return true;
     });
 }
 
@@ -929,9 +949,10 @@ function maybeAlert(state) {
   try { mem = JSON.parse(localStorage.getItem(MEMKEY) || "null"); } catch (_) {}
   if (!mem || typeof mem !== "object") mem = {};
   const now = Date.now();
-  const cool = 20 * 60 * 1000;       // درصد نسبت به سواپ / سقف‌کف
-  const coolPhase = 18 * 60 * 1000;  // rally / dump (آماده‌باش)
-  const coolRev = 8 * 60 * 1000;     // برگشت روند — فوری‌تر، cooldown کوتاه‌تر
+  const cool = 20 * 60 * 1000;       // سقف‌کف
+  const coolPhase = 18 * 60 * 1000;  // rally / dump
+  const coolRev = 8 * 60 * 1000;     // برگشت روند
+  const coolProfit = 3 * 60 * 60 * 1000; // سود/ضرر — جلوگیری از اسپم آستانه‌ها
   const recently = (k, c) => mem[k] && now - mem[k] < (c || cool);
   // Global gap: at most one Telegram message every ALERT_GLOBAL_GAP_MS
   // استثنا: برگشت فوری می‌تواند gap را کمی بشکند (نیمه gap)
@@ -944,6 +965,9 @@ function maybeAlert(state) {
   const mark = (k) => {
     mem[k] = now;
     mem._lastAny = now;
+    // family locks so 1.5% → 2% → 2.5% cannot cascade
+    if (String(k).startsWith("ls_profit")) mem.fam_profit = now;
+    if (String(k).startsWith("ls_loss")) mem.fam_loss = now;
     try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
   };
   /** Soft-lock gap while request is in flight; full key mark only after success */
@@ -997,38 +1021,43 @@ function maybeAlert(state) {
     return sendOne("below", msgFloor(below, live, stText()), "هشدار کف قیمت");
   }
 
-  // ── Priority 2: درصد نسبت به آخرین سواپ — فقط هم‌جهت با پوزیشن ──
+  // ── Priority 2: درصد نسبت به آخرین سواپ — فقط قوی‌ترین آستانه + cooldown خانوادگی ──
   const lt = lastTrade();
   if (lt && lt.price > 0) {
     const ref = lt.price;
     const vsSwap = ((live - ref) / ref) * 100;
-    // GRAM داری + آخرین سواپ خرید → سود/ضرر روی خرید
+    const profits = (profitPcts || []).filter((x) => x > 0).slice().sort((a, b) => a - b);
+    const losses = (lossPcts || []).filter((x) => x > 0).slice().sort((a, b) => a - b);
+
     if (stance.action === "sell" && lt.type === "buy") {
-      for (const targetPct of profitPcts) {
-        const key = "ls_profit_buy_" + targetPct;
-        if (vsSwap >= targetPct && !recently(key)) {
-          return sendOne(key, msgProfitBuy(vsSwap, targetPct, ref, live, stText()), "هشدار هدف سود");
+      if (!recently("fam_profit", coolProfit) && !recently("ls_profit_buy", coolProfit)) {
+        let best = null;
+        for (const t of profits) { if (vsSwap >= t) best = t; }
+        if (best != null) {
+          return sendOne("ls_profit_buy", msgProfitBuy(vsSwap, best, ref, live, stText()), "هشدار هدف سود");
         }
       }
-      for (const lossPct of lossPcts) {
-        const key = "ls_loss_buy_" + lossPct;
-        if (vsSwap <= -lossPct && !recently(key)) {
-          return sendOne(key, msgLossBuy(vsSwap, lossPct, ref, live, stText()), "هشدار افت از خرید");
+      if (!recently("fam_loss", coolProfit) && !recently("ls_loss_buy", coolProfit)) {
+        let best = null;
+        for (const t of losses) { if (vsSwap <= -t) best = t; }
+        if (best != null) {
+          return sendOne("ls_loss_buy", msgLossBuy(vsSwap, best, ref, live, stText()), "هشدار افت از خرید");
         }
       }
     }
-    // تتر داری + آخرین سواپ فروش → فرصت خرید / رشد بعد از فروش
     if (stance.action === "buy" && lt.type === "sell") {
-      for (const targetPct of profitPcts) {
-        const key = "ls_profit_sell_" + targetPct;
-        if (vsSwap <= -targetPct && !recently(key)) {
-          return sendOne(key, msgProfitSell(vsSwap, targetPct, ref, live, stText()), "هشدار فرصت خرید");
+      if (!recently("fam_profit", coolProfit) && !recently("ls_profit_sell", coolProfit)) {
+        let best = null;
+        for (const t of profits) { if (vsSwap <= -t) best = t; }
+        if (best != null) {
+          return sendOne("ls_profit_sell", msgProfitSell(vsSwap, best, ref, live, stText()), "هشدار فرصت خرید");
         }
       }
-      for (const lossPct of lossPcts) {
-        const key = "ls_loss_sell_" + lossPct;
-        if (vsSwap >= lossPct && !recently(key)) {
-          return sendOne(key, msgLossSell(vsSwap, lossPct, ref, live, stText()), "هشدار رشد بعد از فروش");
+      if (!recently("fam_loss", coolProfit) && !recently("ls_loss_sell", coolProfit)) {
+        let best = null;
+        for (const t of losses) { if (vsSwap >= t) best = t; }
+        if (best != null) {
+          return sendOne("ls_loss_sell", msgLossSell(vsSwap, best, ref, live, stText()), "هشدار رشد بعد از فروش");
         }
       }
     }
@@ -1312,7 +1341,17 @@ function bindTg() {
   document.getElementById("tgPriceReport").onchange = (e) => {
     tg.priceReport30m = e.target.checked;
     saveTg();
-    toast(tg.priceReport30m ? "گزارش هر ۳۰ دقیقه فعال شد" : "گزارش هر ۳۰ دقیقه خاموش شد");
+    if (tg.priceReport30m) {
+      toast("گزارش هر ۳۰ دقیقه فعال شد — تب باید باز بماند");
+      // reset timer so next due is ~30m from now (not stuck on old lastReport)
+      try {
+        const mem = JSON.parse(localStorage.getItem(MEMKEY) || "{}") || {};
+        mem._lastPriceReport = Date.now();
+        localStorage.setItem(MEMKEY, JSON.stringify(mem));
+      } catch (_) {}
+    } else {
+      toast("گزارش هر ۳۰ دقیقه خاموش شد");
+    }
   };
   renderPctChips("profitPctList", tg.alertTargetPcts, "profit");
   renderPctChips("lossPctList", tg.alertLossPcts, "loss");
@@ -1431,8 +1470,15 @@ document.getElementById("walletAddr").onkeydown = (e) => {
   if (e.key === "Enter") { e.preventDefault(); syncWallet(true); }
 };
 document.getElementById("btnTgTest").onclick = () => {
+  const token = (tg.token || "").trim();
+  const chat = (tg.chatId || "").trim();
+  if (!token || !chat) {
+    toast("اول توکن و Chat ID را پر کن");
+    return;
+  }
+  toast("در حال ارسال…");
   sendTelegram(msgConnected())
-    .then(() => toast("پیام تست ارسال شد"))
+    .then(() => toast("پیام تست ارسال شد — تلگرام را چک کن"))
     .catch((e) => toast(e.message || "ارسال ناموفق"));
 };
 document.getElementById("chartDays").onclick = (e) => {
@@ -1488,12 +1534,30 @@ setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 25
 setInterval(() => { refreshPrice(false); }, 15000);
 // auto re-sync wallet every 10 minutes
 setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
+// Periodic status: check every 60s, send if ≥30 min since last report
+// (page must stay open; closing the tab stops this — use ton-alert / bot for offline)
+const PRICE_REPORT_MS = 30 * 60 * 1000;
 setInterval(async () => {
-  if (!tg.priceReport30m || !tg.enabled || !tg.token || !tg.chatId) return;
+  if (!tg.priceReport30m || !tg.enabled) return;
+  if (!(tg.token || "").trim() || !(tg.chatId || "").trim()) return;
+  let mem = {};
+  try { mem = JSON.parse(localStorage.getItem(MEMKEY) || "{}") || {}; } catch (_) {}
+  const last = Number(mem._lastPriceReport) || 0;
+  if (Date.now() - last < PRICE_REPORT_MS) return;
+  if (setInterval._reportBusy) return;
+  setInterval._reportBusy = true;
   try {
     await refreshPrice(true);
+    if (live == null) throw new Error("قیمت در دسترس نیست");
     const s = calcState(trades, live);
     await sendTelegram(buildStatusMessage(s));
-  } catch (_) {}
-}, 30 * 60 * 1000);
+    mem._lastPriceReport = Date.now();
+    try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
+    console.log("price report sent");
+  } catch (e) {
+    console.warn("price report failed:", e && e.message ? e.message : e);
+  } finally {
+    setInterval._reportBusy = false;
+  }
+}, 60 * 1000);
 window.addEventListener("resize", () => drawChart(chartPts, calcState(trades, live).avgBuyPrice || null));
