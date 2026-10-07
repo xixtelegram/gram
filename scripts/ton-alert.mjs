@@ -8,37 +8,38 @@
  * Optional env:
  *   ALERT_ABOVE, ALERT_BELOW          — absolute price ceiling / floor
  *   ALERT_PROFIT_PCTS, ALERT_LOSS_PCTS — comma lists e.g. "0.5,1,2,3"
+ *   STOP_LOSS_PCT                    — default 3
  *   REPORT=1                          — force full status + chart this run
  *   REPORT_EVERY_HOURS=6              — periodic status when PC is off (default 0=off)
  *   STATE_PATH                        — default .alert-state.json
  *   EVENT_NAME                        — set by workflow (schedule | workflow_dispatch)
+ *   DRY_RUN=1                         — log only, no Telegram send
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import {
   STON_POOL,
+  RATES_TOKEN,
+  DEFAULT_STRATEGY,
+  mergeStrategy,
   parseSwapsFromEvents,
   calcState,
   sellIsWorthwhile,
   buyIsWorthwhile,
   detectMomentum,
+  analyzeMultiTimeframe,
+  normalizePriceSeries,
+  evaluateAlerts,
+  cooldownFor,
   noiseAbs,
   fmt,
   num,
+  positionStance,
 } from "./gram-core.mjs";
 import {
   stanceLine as tgStance,
   stanceOf,
   buildStatusMessage,
-  msgCeiling,
-  msgFloor,
-  msgProfitBuy,
-  msgLossBuy,
-  msgProfitSell,
-  msgLossSell,
-  msgRallyPrepare,
-  msgReversalSell,
-  msgDumpWatch,
-  msgReversalBuy,
+  renderAlertMessage,
   statusChartUrl,
 } from "./telegram-messages.mjs";
 
@@ -51,9 +52,11 @@ const PROFIT_PCTS = listNums(process.env.ALERT_PROFIT_PCTS);
 const LOSS_PCTS = listNums(process.env.ALERT_LOSS_PCTS);
 const STATE_PATH = process.env.STATE_PATH || ".alert-state.json";
 const REPORT_EVERY_HOURS = num(process.env.REPORT_EVERY_HOURS) || 0;
-const COOLDOWN_MS = 20 * 60 * 1000;
-const COOL_MOM_MS = 12 * 60 * 1000;
 const FETCH_RETRIES = 3;
+
+const STRATEGY = mergeStrategy({
+  stopLossPct: num(process.env.STOP_LOSS_PCT) || DEFAULT_STRATEGY.stopLossPct,
+});
 
 function listNums(v) {
   if (!v) return [];
@@ -110,14 +113,39 @@ async function getPrice() {
       if (usd) cex = { usd, source: "Coinbase" };
     } catch (_) {}
   }
-  if (!dex && !cex) throw new Error("no price source");
-  const primary = dex || cex;
+  let tonapi = null;
+  try {
+    const j = await fetchJson("https://tonapi.io/v2/rates?tokens=" + RATES_TOKEN + "&currencies=usd");
+    const row = j.rates && (j.rates.TON || j.rates.ton);
+    const usd = row && row.prices && Number(row.prices.USD);
+    if (usd) tonapi = { usd, source: "tonapi", diff24h: row.diff_24h && row.diff_24h.USD };
+  } catch (_) {}
+
+  if (!dex && !cex && !tonapi) throw new Error("no price source");
+  const primary = dex || cex || tonapi;
   return {
     usd: primary.usd,
     source: primary.source,
     dexUsd: dex ? dex.usd : null,
     cexUsd: cex ? cex.usd : null,
+    tonapiUsd: tonapi ? tonapi.usd : null,
+    diff24h: tonapi && tonapi.diff24h,
   };
+}
+
+async function fetchPriceHistory() {
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - 365 * 86400;
+  try {
+    const j = await fetchJson(
+      `https://tonapi.io/v2/rates/chart?token=${RATES_TOKEN}&currency=usd&points_count=200&start_date=${start}&end_date=${end}`,
+      20000
+    );
+    return normalizePriceSeries(j.points || []);
+  } catch (e) {
+    console.warn("history fetch failed:", e.message || e);
+    return [];
+  }
 }
 
 async function fetchWalletSwaps(addr) {
@@ -172,7 +200,6 @@ async function sendTelegram(text) {
   }
 }
 
-/** Text + optional chart image (caption max ~1024 chars) */
 async function sendTelegramPhoto(caption, photoUrl) {
   if (!TOKEN || !CHAT) throw new Error("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing");
   if (!photoUrl) return sendTelegram(caption);
@@ -204,10 +231,12 @@ function loadState() {
   try {
     if (existsSync(STATE_PATH)) return JSON.parse(readFileSync(STATE_PATH, "utf8"));
   } catch (_) {}
-  return { series: [], marks: {} };
+  return { series: [], marks: {}, version: 2 };
 }
 function saveState(st) {
   try {
+    st.version = 2;
+    st.updatedAt = Date.now();
     writeFileSync(STATE_PATH, JSON.stringify(st));
   } catch (e) {
     console.warn("state save failed", e.message);
@@ -215,7 +244,7 @@ function saveState(st) {
 }
 function recently(mem, k, cool) {
   const t = mem.marks && mem.marks[k];
-  return t && Date.now() - t < (cool || COOLDOWN_MS);
+  return t && Date.now() - t < (cool || STRATEGY.cool.level);
 }
 function mark(mem, k) {
   if (!mem.marks) mem.marks = {};
@@ -224,7 +253,7 @@ function mark(mem, k) {
 function pushSample(mem, p) {
   if (!Array.isArray(mem.series)) mem.series = [];
   mem.series.push({ t: Date.now(), p });
-  if (mem.series.length > 80) mem.series = mem.series.slice(-80);
+  if (mem.series.length > 120) mem.series = mem.series.slice(-120);
   return mem.series;
 }
 
@@ -235,13 +264,17 @@ function lastTradeFromPos(pos) {
 
 function checks() {
   return {
-    sellIsWorthwhile: (s, p) => sellIsWorthwhile(s, p, poolTonReserve),
-    buyIsWorthwhile: (s, p) => buyIsWorthwhile(s, p, poolTonReserve),
+    sellIsWorthwhile: (s, p) => sellIsWorthwhile(s, p, poolTonReserve, STRATEGY),
+    buyIsWorthwhile: (s, p) => buyIsWorthwhile(s, p, poolTonReserve, STRATEGY),
   };
 }
 
 function stanceText(pos, live) {
   return tgStance(pos, live, lastTradeFromPos(pos), checks());
+}
+
+function logEvent(obj) {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
 async function main() {
@@ -256,138 +289,103 @@ async function main() {
 
   const priceInfo = await getPrice();
   const live = priceInfo.usd;
-  console.log(`Price ${live} from ${priceInfo.source}`);
+  logEvent({
+    event: "price",
+    live,
+    source: priceInfo.source,
+    dex: priceInfo.dexUsd,
+    cex: priceInfo.cexUsd,
+    tonapi: priceInfo.tonapiUsd,
+    diff24h: priceInfo.diff24h,
+  });
 
-  const [swaps, bal] = await Promise.all([
+  const [swaps, bal, hist] = await Promise.all([
     fetchWalletSwaps(WALLET),
     fetchWalletBalances(WALLET).catch(() => null),
+    fetchPriceHistory(),
   ]);
-  console.log(`Swaps: ${swaps.length}`);
-  const pos = calcState(swaps, live, bal);
-  console.log(`Pos GRAM=${pos.totalGram} USDT=${pos.cashUsdt} avg=${pos.avgBuyPrice}`);
+  logEvent({ event: "wallet", swaps: swaps.length, ton: bal && bal.ton, usdt: bal && bal.usdt, histPoints: hist.length });
 
+  const pos = calcState(swaps, live, bal);
   const mem = loadState();
   const series = pushSample(mem, live);
-  const mom = detectMomentum(series);
+  const mom = detectMomentum(series, STRATEGY);
+  const mtf = analyzeMultiTimeframe(live, hist, STRATEGY);
   const stance = stanceOf(pos, live);
   const lt = lastTradeFromPos(pos);
-  const quote = { source: priceInfo.source, dexUsd: priceInfo.dexUsd, cexUsd: priceInfo.cexUsd };
-  /** @type {{text:string, photo?:boolean, key?:string, urgent?:boolean}[]} */
-  const msgs = [];
+  const quote = {
+    source: priceInfo.source,
+    dexUsd: priceInfo.dexUsd,
+    cexUsd: priceInfo.cexUsd,
+  };
+
+  logEvent({
+    event: "analysis",
+    stance: stance.mode + "/" + stance.action,
+    phase: mom.phase,
+    dir: mom.dir,
+    movePct: +Number(mom.movePct || 0).toFixed(3),
+    avg: pos.avgBuyPrice,
+    gram: pos.totalGram,
+    usdt: pos.cashUsdt,
+    mtfExtremes: (mtf.extremes || []).map((e) => e.kind + ":" + e.periodId),
+  });
+
+  const candidates = evaluateAlerts({
+    pos,
+    live,
+    mom,
+    mtf,
+    lastTrade: lt,
+    profitPcts: PROFIT_PCTS,
+    lossPcts: LOSS_PCTS,
+    alertAbove: ALERT_ABOVE,
+    alertBelow: ALERT_BELOW,
+    poolTonReserve,
+    cfg: STRATEGY,
+  });
+
+  const ready = candidates.filter((a) => {
+    const cool = cooldownFor(a, STRATEGY);
+    if (recently(mem, a.key, cool)) return false;
+    return true;
+  });
+
   const st = () => stanceText(pos, live);
-  const nAbs = mom.noise || noiseAbs(live);
-  const movePct = mom.movePct != null ? mom.movePct : (mom.from > 0 ? ((live - mom.from) / mom.from) * 100 : 0);
-  const COOL_REV_MS = 8 * 60 * 1000;
-  const COOL_PHASE_MS = 18 * 60 * 1000;
+  const msgs = ready.map((a) => ({
+    key: a.key,
+    urgent: !!a.urgent,
+    text: renderAlertMessage(a, st()),
+    priority: a.priority,
+    type: a.type,
+  }));
 
-  console.log(`Stance=${stance.mode}/${stance.action} phase=${mom.phase} dir=${mom.dir} movePct=${movePct.toFixed(2)}`);
-
-  // Priority 0: برگشت روند فوری (وابسته به پوزیشن)
-  if (stance.action === "sell" && mom.phase === "reversal_down" && !recently(mem, "phase_rev_sell", COOL_REV_MS)) {
-    if (Math.abs(mom.delta) >= nAbs) {
-      msgs.push({
-        key: "phase_rev_sell",
-        urgent: true,
-        text: msgReversalSell(mom.from, live, Math.abs(mom.delta), Math.abs(movePct), st()),
-      });
-    }
-  }
-  if (stance.action === "buy" && mom.phase === "reversal_up" && !recently(mem, "phase_rev_buy", COOL_REV_MS)) {
-    if (Math.abs(mom.delta) >= nAbs) {
-      msgs.push({
-        key: "phase_rev_buy",
-        urgent: true,
-        text: msgReversalBuy(mom.from, live, Math.abs(movePct), st()),
-      });
-    }
-  }
-
-  // Priority 1: سقف / کف
-  if (ALERT_ABOVE != null && live >= ALERT_ABOVE && !recently(mem, "above")) {
-    msgs.push({ key: "above", text: msgCeiling(ALERT_ABOVE, live, st()) });
-  }
-  if (ALERT_BELOW != null && live <= ALERT_BELOW && !recently(mem, "below")) {
-    msgs.push({ key: "below", text: msgFloor(ALERT_BELOW, live, st()) });
-  }
-
-  // Priority 2: درصد نسبت به آخرین سواپ — فقط هم‌جهت با پوزیشن
-  if (lt && lt.price > 0) {
-    const ref = lt.price;
-    const vsSwap = ((live - ref) / ref) * 100;
-    if (stance.action === "sell" && lt.type === "buy") {
-      for (const target of PROFIT_PCTS) {
-        const key = "ls_profit_buy_" + target;
-        if (vsSwap >= target && !recently(mem, key)) {
-          msgs.push({ key, text: msgProfitBuy(vsSwap, target, ref, live, st()) });
-          break;
-        }
-      }
-      for (const loss of LOSS_PCTS) {
-        const key = "ls_loss_buy_" + loss;
-        if (vsSwap <= -loss && !recently(mem, key)) {
-          msgs.push({ key, text: msgLossBuy(vsSwap, loss, ref, live, st()) });
-          break;
-        }
-      }
-    }
-    if (stance.action === "buy" && lt.type === "sell") {
-      for (const target of PROFIT_PCTS) {
-        const key = "ls_profit_sell_" + target;
-        if (vsSwap <= -target && !recently(mem, key)) {
-          msgs.push({ key, text: msgProfitSell(vsSwap, target, ref, live, st()) });
-          break;
-        }
-      }
-      for (const loss of LOSS_PCTS) {
-        const key = "ls_loss_sell_" + loss;
-        if (vsSwap >= loss && !recently(mem, key)) {
-          msgs.push({ key, text: msgLossSell(vsSwap, loss, ref, live, st()) });
-          break;
-        }
-      }
-    }
-  }
-
-  // Priority 3: ادامه روند — آماده‌باش
-  if (stance.action === "sell" && mom.phase === "rally" && !recently(mem, "phase_rally", COOL_PHASE_MS)) {
-    if (Math.abs(mom.delta) >= nAbs || (mom.strength || 0) >= 0.6) {
-      msgs.push({ key: "phase_rally", text: msgRallyPrepare(mom.from, live, Math.abs(movePct), st()) });
-    }
-  }
-  if (stance.action === "buy" && mom.phase === "dump" && !recently(mem, "phase_dump", COOL_PHASE_MS)) {
-    if (Math.abs(mom.delta) >= nAbs || (mom.strength || 0) >= 0.6) {
-      msgs.push({ key: "phase_dump", text: msgDumpWatch(mom.from, live, Math.abs(movePct), st()) });
-    }
-  }
-
-  // Force report (manual) or periodic status while PC is offline
   const forceReport = process.env.REPORT === "1";
   const reportEveryMs = REPORT_EVERY_HOURS > 0 ? REPORT_EVERY_HOURS * 60 * 60 * 1000 : 0;
   const lastReportAt = (mem.marks && mem.marks._lastReport) || 0;
-  const duePeriodic =
-    reportEveryMs > 0 && Date.now() - lastReportAt >= reportEveryMs;
+  const duePeriodic = reportEveryMs > 0 && Date.now() - lastReportAt >= reportEveryMs;
 
   if (forceReport || duePeriodic) {
     const status = buildStatusMessage(pos, live, quote, lt, checks(), poolTonReserve);
-    msgs.push({ key: "_lastReport", text: status, photo: true });
+    msgs.push({ key: "_lastReport", text: status, photo: true, priority: 99 });
     console.log(forceReport ? "Forced status report" : `Periodic report due (every ${REPORT_EVERY_HOURS}h)`);
   }
 
-  // یک پیام اولویت‌دار در هر اجرا
-  // اولویت: urgent (برگشت روند) > بقیه هشدارها > گزارش دوره‌ای
   let out = msgs;
   if (out.length > 1) {
     const urgent = out.find((m) => m.urgent);
     const status = out.find((m) => m.photo);
     if (urgent) out = [urgent];
     else if ((forceReport || duePeriodic) && status) out = [status];
-    else out = [out[0]];
+    else {
+      out.sort((a, b) => (a.priority || 50) - (b.priority || 50));
+      out = [out[0]];
+    }
   }
 
-  // Always persist price series; cooldown marks only after successful send
   saveState(mem);
   if (!out.length) {
-    console.log("No alerts to send");
+    logEvent({ event: "no_alert", candidates: candidates.length, cooled: candidates.length - ready.length });
     return;
   }
 
@@ -395,7 +393,7 @@ async function main() {
   const dryRun = process.env.DRY_RUN === "1";
   let sent = 0;
   for (const m of out) {
-    console.log((dryRun ? "[DRY] " : "") + "Sending:", m.text.slice(0, 120).replace(/\n/g, " | "));
+    console.log((dryRun ? "[DRY] " : "") + "Sending:", (m.type || m.key || "") + " | " + m.text.slice(0, 100).replace(/\n/g, " · "));
     if (dryRun) {
       if (m.key) mark(mem, m.key);
       sent++;
@@ -406,8 +404,10 @@ async function main() {
       else await sendTelegram(m.text);
       if (m.key) mark(mem, m.key);
       sent++;
+      logEvent({ event: "sent", key: m.key, type: m.type, urgent: !!m.urgent });
     } catch (e) {
       console.error("Send failed:", e.message || e);
+      logEvent({ event: "send_failed", key: m.key, error: String(e.message || e) });
     }
   }
   saveState(mem);
@@ -417,5 +417,6 @@ async function main() {
 
 main().catch((e) => {
   console.error(e);
+  logEvent({ event: "fatal", error: String(e.message || e) });
   process.exit(1);
 });
