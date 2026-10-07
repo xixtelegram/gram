@@ -233,6 +233,22 @@ export function targetsBlock(s, lastTrade, poolReserve) {
 
 // ─── stanceLine ───
 
+/**
+ * Short footer for alert messages — matches position action only.
+ * Avoids contradictory lines like "ضرر روی کاغذ" under a buy-opportunity alert
+ * when a leftover GRAM bag is underwater but the user is mainly in USDT.
+ */
+export function alertStanceFooter(s, price) {
+  const st = stanceOf(s, price);
+  if (st.action === "buy") {
+    return st.label + "\nپیشنهاد: اگر می‌خواهی دوباره وارد شوی، خرید را بررسی کن.";
+  }
+  if (st.action === "sell") {
+    return st.label + "\nپیشنهاد: اگر می‌خواهی سود/خروج بگیری، فروش را بررسی کن.";
+  }
+  return st.label || "";
+}
+
 export function stanceLine(s, price, lastTrade, checks) {
   const st = stanceOf(s, price);
   const hl = pnlHeadline(s, price, lastTrade);
