@@ -109,22 +109,22 @@ export function actionAdvice(s, price, hl, checks) {
   if (!price) return "صبر کن تا قیمت درست لود شود.";
   if (hl.kind === "profit" && s.totalGram > 1e-6) {
     if (checks && checks.sellIsWorthwhile(s, price)) {
-      return "پیشنهاد: فروش را بررسی کن. (با فروش واقعی ممکن است کمی کمتر از این عدد بگیری.)";
+      return "دستور: بفروووش — سود معنادار داری؛ فروش را اجرا کن.";
     }
-    return "پیشنهاد: فعلاً نگه دار؛ برای فروش بهتر صبر کن تا به هدف‌های پایین برسد.";
+    return "نگه دار؛ هنوز برای فروش قوی نیست. منتظر هدف بالاتر باش.";
   }
   if (hl.kind === "loss" && s.totalGram > 1e-6) {
-    return "پیشنهاد: عجله نکن. تا نفروشی ضرر فقط روی کاغذ است.";
+    return "عجله نکن. تا نفروشی ضرر فقط روی کاغذ است — مگر حدضرر فعال شده باشد.";
   }
   if (hl.kind === "opportunity") {
     if (checks && checks.buyIsWorthwhile(s, price)) {
-      return "پیشنهاد: نسبت به فروشت ارزان‌تر شده — خرید را بررسی کن.";
+      return "دستور: بخرررر — نسبت به فروشت ارزان‌تر شده.";
     }
-    return "پیشنهاد: کمی ارزان شده؛ هنوز برای خرید عجله نکن.";
+    return "کمی ارزان شده؛ هنوز برای خرید عجله نکن.";
   }
-  if (hl.kind === "missed") return "پیشنهاد: الان نخر. صبر کن قیمت دوباره نزدیک فروشت شود.";
-  if (hl.kind === "unknown") return "پیشنهاد: اول تاریخچه سواپ یا کیف‌پول را وصل کن.";
-  return "پیشنهاد: شرایط عادی است — معامله عجولانه لازم نیست.";
+  if (hl.kind === "missed") return "الان نخر. صبر کن قیمت دوباره نزدیک فروشت شود.";
+  if (hl.kind === "unknown") return "اول تاریخچه سواپ یا کیف‌پول را وصل کن.";
+  return "شرایط عادی — معامله عجولانه لازم نیست.";
 }
 
 /** کارت پیشنهاد UI — تنها منبع متن hint/rows */
@@ -241,12 +241,65 @@ export function targetsBlock(s, lastTrade, poolReserve) {
 export function alertStanceFooter(s, price) {
   const st = stanceOf(s, price);
   if (st.action === "buy") {
-    return st.label + "\nپیشنهاد: اگر می‌خواهی دوباره وارد شوی، خرید را بررسی کن.";
+    return st.label + "\nسمت تو: خرید (تتر داری)";
   }
   if (st.action === "sell") {
-    return st.label + "\nپیشنهاد: اگر می‌خواهی سود/خروج بگیری، فروش را بررسی کن.";
+    return st.label + "\nسمت تو: فروش (GRAM داری)";
   }
   return st.label || "";
+}
+
+/** Format projection block from analyzeTradeOpportunity result */
+function projectionBlock(opp) {
+  if (!opp) return "";
+  let t = "";
+  if (opp.targetUpPct != null || opp.targetDownPct != null) {
+    t += "\n\n📐 تخمین حرکت بعدی";
+    if (opp.horizon) t += " (افق: " + opp.horizon + ")";
+    t += ":";
+    if (opp.targetUpPct != null) {
+      t += "\n• رشد ممکن: حدود +" + pctStr(opp.targetUpPct, 1);
+      if (opp.targetUpPrice != null) t += " → نزدیک " + fmt(opp.targetUpPrice, 4);
+    }
+    if (opp.targetDownPct != null) {
+      t += "\n• ریزش ممکن: حدود −" + pctStr(opp.targetDownPct, 1);
+      if (opp.targetDownPrice != null) t += " → نزدیک " + fmt(opp.targetDownPrice, 4);
+    }
+  }
+  if (opp.confidence != null) {
+    t += "\n• اطمینان سیگنال: " + Math.round(opp.confidence) + "٪";
+  }
+  return t;
+}
+
+function reasonFa(key) {
+  const map = {
+    pos_usdt: "بیشتر سرمایه‌ات تتر است",
+    pos_gram: "بیشتر سرمایه‌ات GRAM است",
+    rev_up: "برگشت صعودی بعد از ریزش",
+    rev_down: "برگشت نزولی بعد از رشد",
+    rally: "روند رشد فعال",
+    dump: "روند ریزش فعال",
+    asymm_up: "جا برای رشد بیشتر از ریزش",
+    asymm_down: "جا برای ریزش بیشتر از رشد",
+  };
+  if (map[key]) return map[key];
+  if (key.startsWith("near_low_")) return "نزدیک کف بازهٔ " + key.replace("near_low_", "");
+  if (key.startsWith("near_high_")) return "نزدیک سقف بازهٔ " + key.replace("near_high_", "");
+  if (key.startsWith("violent_drop_")) return "ریزش تند در " + key.replace("violent_drop_", "");
+  if (key.startsWith("violent_rally_")) return "رشد تند در " + key.replace("violent_rally_", "");
+  return key;
+}
+
+function reasonsLine(opp) {
+  if (!opp || !opp.reasons || !opp.reasons.length) return "";
+  const uniq = [];
+  for (const r of opp.reasons) {
+    const fa = reasonFa(r);
+    if (fa && !uniq.includes(fa)) uniq.push(fa);
+  }
+  if (!uniq.length) return "";
+  return "\n\nدلیل: " + uniq.slice(0, 4).join(" · ");
 }
 
 export function stanceLine(s, price, lastTrade, checks) {
@@ -299,125 +352,151 @@ export function buildStatusMessage(s, live, quote, lastTrade, checks, poolReserv
   return msg;
 }
 
-// ─── alerts ───
+// ─── alerts (explicit BUY / SELL language) ───
 
-export function msgCeiling(above, live, stanceText) {
+/** Primary command messages from analyzeTradeOpportunity */
+export function msgTradeBuy(payload, stanceText) {
+  const opp = (payload && payload.opportunity) || {};
+  const live = payload && payload.live;
+  let t =
+    "🟢🟢 بخرررر\n\n" +
+    "سیگنال خرید فعال شد.\n" +
+    priceLine("قیمت الان", live);
+  t += projectionBlock(opp);
+  t += reasonsLine(opp);
+  t += "\n\nدستور: همین الان خرید را اجرا کن (یا حداقل بخشی از تترت را وارد کن).";
+  return t + footer(stanceText);
+}
+
+export function msgTradeSell(payload, stanceText) {
+  const opp = (payload && payload.opportunity) || {};
+  const live = payload && payload.live;
+  let t =
+    "🔴🔴 بفروووش\n\n" +
+    "سیگنال فروش فعال شد.\n" +
+    priceLine("قیمت الان", live);
+  t += projectionBlock(opp);
+  t += reasonsLine(opp);
+  t += "\n\nدستور: همین الان فروش را اجرا کن (حداقل بخشی از GRAM را خارج کن).";
+  return t + footer(stanceText);
+}
+
+export function msgCeiling(above, live, stanceText, opportunity) {
   return (
-    "🔺 قیمت به سقف رسید\n\n" +
+    "🔺 سقف شخصی رد شد — بفروووش\n\n" +
     "سقفی که گذاشته بودی: " + fmt(above, 4) + "\n" +
     "قیمت الان: " + fmt(live, 4) + "\n\n" +
-    "اگر بیشتر سرمایه‌ات GRAM است → فروش را جدی بررسی کن.\n" +
-    "اگر بیشتر تتر داری → فقط اطلاع است." +
+    "دستور: اگر GRAM داری فروش را اجرا کن." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgFloor(below, live, stanceText) {
+export function msgFloor(below, live, stanceText, opportunity) {
   return (
-    "🔻 قیمت به کف رسید\n\n" +
+    "🔻 کف شخصی رسید — بخرررر\n\n" +
     "کفی که گذاشته بودی: " + fmt(below, 4) + "\n" +
     "قیمت الان: " + fmt(live, 4) + "\n\n" +
-    "اگر بیشتر سرمایه‌ات تتر است → نزدیک محدوده خریدت هستی.\n" +
-    "اگر GRAM داری → فقط اطلاع است؛ عجله برای فروش از ترس لازم نیست." +
+    "دستور: اگر تتر داری خرید را اجرا کن." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgProfitBuy(movePct, targetPct, ref, live, stanceText) {
+export function msgProfitBuy(movePct, targetPct, ref, live, stanceText, opportunity) {
   return (
-    "🟢 به هدف سود رسیدی\n\n" +
-    "از خریدت حدود +" + pctStr(movePct) + " بالاتر آمده\n" +
-    "(هدف تو: +" + pctStr(targetPct, 2) + ")\n\n" +
+    "🟢 به هدف سود رسیدی — بفروووش\n\n" +
+    "از خریدت حدود +" + pctStr(movePct) + " بالاتر\n" +
+    "(هدف: +" + pctStr(targetPct, 2) + ")\n\n" +
     priceLine("قیمت خریدت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "چون هنوز GRAM داری: اگر می‌خواهی سود را قطعی کنی، فروش را بررسی کن.\n" +
-    "تا نفروشی این سود فقط روی کاغذ است." +
+    "دستور: سود را قطعی کن — فروش را اجرا کن." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgLossBuy(movePct, lossPct, ref, live, stanceText) {
+export function msgLossBuy(movePct, lossPct, ref, live, stanceText, opportunity) {
   return (
-    "🔴 قیمت از خریدت پایین‌تر آمده\n\n" +
+    "🔴 زیر خریدت — مدیریت ریسک\n\n" +
     "حدود " + pctStr(movePct) + " نسبت به خریدت\n" +
-    "(آستانه تو: −" + pctStr(lossPct, 2) + ")\n\n" +
+    "(آستانه: −" + pctStr(lossPct, 2) + ")\n\n" +
     priceLine("قیمت خریدت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "مهم: تا نفروشی ضرر قطعی نیست.\n" +
-    "پیشنهاد: عجله نکن؛ مگر خودت از قبل برنامه خروج داری." +
+    "تا نفروشی ضرر قطعی نیست. اگر حدضرر شخصی داری → بفروووش." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgProfitSell(movePct, targetPct, ref, live, stanceText) {
+export function msgProfitSell(movePct, targetPct, ref, live, stanceText, opportunity) {
   return (
-    "🟢 فرصت خرید دوباره\n\n" +
-    "از فروشت حدود " + pctStr(movePct) + " ارزان‌تر شده\n" +
-    "(هدف تو: −" + pctStr(targetPct, 2) + ")\n\n" +
+    "🟢 ارزان‌تر از فروشت — بخرررر\n\n" +
+    "از فروشت حدود " + pctStr(movePct) + " ارزان‌تر\n" +
+    "(هدف: −" + pctStr(targetPct, 2) + ")\n\n" +
     priceLine("قیمت فروشت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "چون بیشتر سرمایه‌ات تتر است: خرید را بررسی کن." +
+    "دستور: خرید دوباره را اجرا کن." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgLossSell(movePct, lossPct, ref, live, stanceText) {
+export function msgLossSell(movePct, lossPct, ref, live, stanceText, opportunity) {
   return (
     "🟡 بعد از فروشت قیمت بالا رفته\n\n" +
     "حدود +" + pctStr(movePct) + " بالاتر از فروشت\n" +
-    "(آستانه اطلاع: +" + pctStr(lossPct, 2) + ")\n\n" +
+    "(آستانه: +" + pctStr(lossPct, 2) + ")\n\n" +
     priceLine("قیمت فروشت", ref) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "پیشنهاد: الان تعقیب نکن و عجولانه نخر.\n" +
-    "صبر کن دوباره نزدیک قیمت فروشت شود." +
+    "دستور: الان تعقیب نکن — صبر تا نزدیک فروشت." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgRallyPrepare(from, live, movePct, stanceText) {
+export function msgRallyPrepare(from, live, movePct, stanceText, opportunity) {
   return (
-    "📈 GRAM داره رشد می‌کنه — آماده باش\n\n" +
-    "از " + fmt(from, 4) + " رسیده به " + fmt(live, 4) + "\n" +
-    "(حدود +" + pctStr(Math.abs(movePct)) + " در این بازه)\n\n" +
-    "چون بیشتر سرمایه‌ات GRAM است:\n" +
-    "رشد ادامه دارد. فروش عجله‌ای لازم نیست؛\n" +
-    "ولی اگر برگشت نزولی دیدیم، زود خبر می‌دهیم تا برای فروش آماده باشی." +
+    "📈 رشد فعال\n\n" +
+    "از " + fmt(from, 4) + " → " + fmt(live, 4) +
+    " (حدود +" + pctStr(Math.abs(movePct)) + ")\n\n" +
+    "اگر GRAM داری: فعلاً نگه دار؛ با برگشت نزولی → بفروووش.\n" +
+    "اگر تتر داری: تعقیب نکن." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgReversalSell(from, live, drop, movePct, stanceText) {
+export function msgReversalSell(from, live, drop, movePct, stanceText, opportunity) {
   return (
-    "🚨 ریزش بعد از رشد — زود فروش را بررسی کن\n\n" +
+    "🚨 برگشت نزولی — بفروووش\n\n" +
     "از " + fmt(from, 4) + " برگشته به " + fmt(live, 4) + "\n" +
     "(حدود −" + pctStr(Math.abs(movePct || 0)) + " از اوج اخیر)\n\n" +
-    "چون بیشتر سرمایه‌ات GRAM است:\n" +
-    "روند بعد از بالا رفتن، نزولی شده.\n" +
-    "اگر نمی‌خواهی سود روی کاغذ از دست برود، همین حالا فروش را جدی بررسی کن." +
+    "دستور: فروش را همین حالا اجرا کن تا سود از دست نرود." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgDumpWatch(from, live, movePct, stanceText) {
+export function msgDumpWatch(from, live, movePct, stanceText, opportunity) {
   return (
-    "📉 قیمت داره می‌ریزه — حواست به خرید باشد\n\n" +
-    "از " + fmt(from, 4) + " رسیده به " + fmt(live, 4) + "\n" +
-    "(حدود −" + pctStr(Math.abs(movePct)) + " در این بازه)\n\n" +
-    "چون بیشتر سرمایه‌ات تتر است:\n" +
-    "ریزش ادامه دارد؛ عجله برای خرید وسط سقوط لازم نیست.\n" +
-    "اگر برگشت رو به بالا شروع شد، زود خبر می‌دهیم تا قبل از گرون شدن بخری." +
+    "📉 ریزش فعال\n\n" +
+    "از " + fmt(from, 4) + " → " + fmt(live, 4) +
+    " (حدود −" + pctStr(Math.abs(movePct)) + ")\n\n" +
+    "اگر تتر داری: وسط سقوط عجله نکن؛ با برگشت صعودی → بخرررر.\n" +
+    "اگر GRAM داری: سایز و حدضرر را چک کن." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
-export function msgReversalBuy(from, live, movePct, stanceText) {
+export function msgReversalBuy(from, live, movePct, stanceText, opportunity) {
   return (
-    "🚨 برگشت رو به بالا — قبل از گرون شدن خرید را بررسی کن\n\n" +
+    "🚨 برگشت صعودی — بخرررر\n\n" +
     "از " + fmt(from, 4) + " برگشته به " + fmt(live, 4) + "\n" +
     "(حدود +" + pctStr(Math.abs(movePct || 0)) + " از کف اخیر)\n\n" +
-    "چون بیشتر سرمایه‌ات تتر است:\n" +
-    "بعد از ریزش، قیمت دوباره بالا آمده.\n" +
-    "اگر برنامه خرید داشتی، همین حالا بررسی کن تا جا نمانی." +
+    "دستور: خرید را همین حالا اجرا کن تا جا نمانی." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
@@ -443,88 +522,88 @@ export function msgBounce(delta, live, stanceText) {
 export function msgConnected() {
   return (
     "✅ اتصال تلگرام برقرار شد\n\n" +
-    "از این به بعد هشدارها و گزارش‌های GRAM همین‌جا می‌آید.\n" +
-    "منطق پیام‌ها:\n" +
-    "• اگر GRAM داری → رشد = آماده‌باش، برگشت نزولی = خبر فروش\n" +
-    "• اگر تتر داری → ریزش = حواس‌جمع، برگشت صعودی = خبر خرید\n" +
-    "• سقف/کف بازه‌های ۲۴س تا ۱سال + حد ضرر از میانگین خرید"
+    "ربات تحلیل‌گر معامله GRAM فعال است.\n" +
+    "منطق:\n" +
+    "• بخرررر / بفروووش صریح بر اساس نمودار چندبازه‌ای\n" +
+    "• تخمین رشد و ریزش بعدی (۲۴س · ۳روز · هفته · ماه · سال)\n" +
+    "• حدضرر + سقف/کف شخصی\n" +
+    "• وابسته به پوزیشن تو (GRAM یا تتر)"
   );
 }
 
 /** Stop-loss vs average entry */
-export function msgStopLoss(pct, avg, live, stanceText) {
+export function msgStopLoss(pct, avg, live, stanceText, opportunity) {
   return (
-    "🛑 حد ضرر — قیمت از میانگین خریدت فاصله گرفته\n\n" +
+    "🛑 حد ضرر — بفروووش\n\n" +
     "ضرر تحقق‌نیافته حدود " + formatPctSigned(pct) + "\n" +
     priceLine("میانگین خرید", avg) + "\n" +
     priceLine("قیمت الان", live) + "\n\n" +
-    "چون هنوز GRAM داری: این فقط هشدار مدیریت ریسک است.\n" +
-    "اگر از قبل حد ضرر مشخص کرده بودی، فروش را جدی بررسی کن.\n" +
-    "اگر برنامه بلندمدت داری، عجله لازم نیست — ولی سایز پوزیشن را مرور کن." +
+    "دستور: فروش را جدی اجرا کن (مدیریت ریسک)." +
+    projectionBlock(opportunity) +
     footer(stanceText)
   );
 }
 
 /** Near period high (24h … 1y) */
-export function msgRangeNearHigh(ex, stanceText) {
+export function msgRangeNearHigh(ex, stanceText, opportunity) {
   const posPct = ex.posInRange != null ? (ex.posInRange * 100).toFixed(0) : "—";
   return (
-    "📍 نزدیک سقف بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
-    "قیمت الان در حدود " + posPct + "٪ بالای دامنهٔ این بازه است.\n" +
+    "📍 نزدیک سقف " + (ex.label || ex.periodId) + " — بفروووش\n\n" +
+    "موقعیت در دامنه: حدود " + posPct + "٪\n" +
     priceLine("سقف بازه", ex.high) + "\n" +
     priceLine("کف بازه", ex.low) + "\n" +
     priceLine("قیمت الان", ex.live) + "\n\n" +
     (ex.fromHighPct != null ? "فاصله از سقف: " + formatPctSigned(ex.fromHighPct) + "\n\n" : "") +
-    "اگر بیشتر سرمایه‌ات GRAM است → فروش جزئی یا حد سود را بررسی کن.\n" +
-    "رسیدن به سقف تاریخی بازه یعنی فضای رشد کوتاه‌مدت محدودتر شده." +
+    "دستور: اگر GRAM داری فروش را اجرا کن." +
+    projectionBlock(opportunity || (ex && ex.opportunity)) +
     footer(stanceText)
   );
 }
 
 /** Near period low */
-export function msgRangeNearLow(ex, stanceText) {
+export function msgRangeNearLow(ex, stanceText, opportunity) {
   const posPct = ex.posInRange != null ? (ex.posInRange * 100).toFixed(0) : "—";
   return (
-    "📍 نزدیک کف بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
-    "قیمت الان در حدود " + posPct + "٪ دامنهٔ این بازه است (نزدیک کف).\n" +
+    "📍 نزدیک کف " + (ex.label || ex.periodId) + " — بخرررر\n\n" +
+    "موقعیت در دامنه: حدود " + posPct + "٪ (نزدیک کف)\n" +
     priceLine("سقف بازه", ex.high) + "\n" +
     priceLine("کف بازه", ex.low) + "\n" +
     priceLine("قیمت الان", ex.live) + "\n\n" +
     (ex.fromLowPct != null ? "فاصله از کف: " + formatPctSigned(ex.fromLowPct) + "\n\n" : "") +
-    "اگر بیشتر سرمایه‌ات تتر است → خرید پله‌ای را بررسی کن.\n" +
-    "نزدیک کف بازه معمولاً نقطهٔ جذاب‌تری برای ورود است تا وسط دامنه." +
+    "دستور: اگر تتر داری خرید را اجرا کن." +
+    projectionBlock(opportunity || (ex && ex.opportunity)) +
     footer(stanceText)
   );
 }
 
 /** Violent drop relative to period range */
-export function msgRangeViolentDrop(ex, stanceText) {
+export function msgRangeViolentDrop(ex, stanceText, opportunity) {
   const vs = ex.moveVsRange != null ? (ex.moveVsRange * 100).toFixed(0) : "—";
   return (
-    "⚡ ریزش تند نسبت به بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
-    "حرکت اخیر حدود " + vs + "٪ از کل دامنهٔ این بازه را پوشش داده.\n" +
+    "⚡ ریزش تند — " + (ex.label || ex.periodId) + "\n\n" +
+    "حرکت اخیر حدود " + vs + "٪ از کل دامنهٔ این بازه.\n" +
     priceLine("سقف بازه", ex.high) + "\n" +
     priceLine("کف بازه", ex.low) + "\n" +
     priceLine("قیمت الان", ex.live) + "\n\n" +
-    "این نوع حرکت «غیرعادی نسبت به همان بازه» است.\n" +
-    "اگر تتر داری → عجله نکن؛ صبر برای تثبیت یا برگشت منطقی‌تر است.\n" +
-    "اگر GRAM داری → سایز و حد ضرر را مرور کن." +
+    "اگر تتر داری: عجله نکن؛ منتظر تثبیت یا برگشت باش → بعد بخرررر.\n" +
+    "اگر GRAM داری: سایز و حدضرر را چک کن." +
+    projectionBlock(opportunity || (ex && ex.opportunity)) +
     footer(stanceText)
   );
 }
 
 /** Violent rally relative to period range */
-export function msgRangeViolentRally(ex, stanceText) {
+export function msgRangeViolentRally(ex, stanceText, opportunity) {
   const vs = ex.moveVsRange != null ? (ex.moveVsRange * 100).toFixed(0) : "—";
   return (
-    "⚡ رشد تند نسبت به بازهٔ " + (ex.label || ex.periodId) + "\n\n" +
-    "حرکت اخیر حدود " + vs + "٪ از کل دامنهٔ این بازه را پوشش داده.\n" +
+    "⚡ رشد تند — " + (ex.label || ex.periodId) + "\n\n" +
+    "حرکت اخیر حدود " + vs + "٪ از کل دامنهٔ این بازه.\n" +
     priceLine("سقف بازه", ex.high) + "\n" +
     priceLine("کف بازه", ex.low) + "\n" +
     priceLine("قیمت الان", ex.live) + "\n\n" +
-    "رشد تند نسبت به بازه معمولاً ناپایدار است.\n" +
-    "اگر GRAM داری → سود جزئی یا جابه‌جایی به تتر را بررسی کن.\n" +
-    "اگر تتر داری → تعقیب قیمت بعد از چنین رشدی ریسک بالاتری دارد." +
+    "اگر GRAM داری: سود جزئی بگیر → بفروووش (بخشی).\n" +
+    "اگر تتر داری: تعقیب نکن." +
+    projectionBlock(opportunity || (ex && ex.opportunity)) +
     footer(stanceText)
   );
 }
@@ -537,37 +616,42 @@ export function msgRangeViolentRally(ex, stanceText) {
 export function renderAlertMessage(alert, stanceText) {
   if (!alert) return "";
   const p = alert.payload || {};
+  const opp = p.opportunity || null;
   switch (alert.type) {
+    case "trade_buy":
+      return msgTradeBuy(p, stanceText);
+    case "trade_sell":
+      return msgTradeSell(p, stanceText);
     case "stop_loss":
-      return msgStopLoss(p.pct, p.avg, p.live, stanceText);
+      return msgStopLoss(p.pct, p.avg, p.live, stanceText, opp);
     case "reversal_sell":
-      return msgReversalSell(p.from, p.live, p.delta, p.movePct, stanceText);
+      return msgReversalSell(p.from, p.live, p.delta, p.movePct, stanceText, opp);
     case "reversal_buy":
-      return msgReversalBuy(p.from, p.live, p.movePct, stanceText);
+      return msgReversalBuy(p.from, p.live, p.movePct, stanceText, opp);
     case "ceiling":
-      return msgCeiling(p.level, p.live, stanceText);
+      return msgCeiling(p.level, p.live, stanceText, opp);
     case "floor":
-      return msgFloor(p.level, p.live, stanceText);
+      return msgFloor(p.level, p.live, stanceText, opp);
     case "profit_buy":
-      return msgProfitBuy(p.vsSwap, p.target, p.ref, p.live, stanceText);
+      return msgProfitBuy(p.vsSwap, p.target, p.ref, p.live, stanceText, opp);
     case "loss_buy":
-      return msgLossBuy(p.vsSwap, p.loss, p.ref, p.live, stanceText);
+      return msgLossBuy(p.vsSwap, p.loss, p.ref, p.live, stanceText, opp);
     case "profit_sell":
-      return msgProfitSell(p.vsSwap, p.target, p.ref, p.live, stanceText);
+      return msgProfitSell(p.vsSwap, p.target, p.ref, p.live, stanceText, opp);
     case "loss_sell":
-      return msgLossSell(p.vsSwap, p.loss, p.ref, p.live, stanceText);
+      return msgLossSell(p.vsSwap, p.loss, p.ref, p.live, stanceText, opp);
     case "rally_prepare":
-      return msgRallyPrepare(p.from, p.live, p.movePct, stanceText);
+      return msgRallyPrepare(p.from, p.live, p.movePct, stanceText, opp);
     case "dump_watch":
-      return msgDumpWatch(p.from, p.live, p.movePct, stanceText);
+      return msgDumpWatch(p.from, p.live, p.movePct, stanceText, opp);
     case "range_near_high":
-      return msgRangeNearHigh(p, stanceText);
+      return msgRangeNearHigh(p, stanceText, opp);
     case "range_near_low":
-      return msgRangeNearLow(p, stanceText);
+      return msgRangeNearLow(p, stanceText, opp);
     case "range_violent_drop":
-      return msgRangeViolentDrop(p, stanceText);
+      return msgRangeViolentDrop(p, stanceText, opp);
     case "range_violent_rally":
-      return msgRangeViolentRally(p, stanceText);
+      return msgRangeViolentRally(p, stanceText, opp);
     default:
       return "هشدار: " + (alert.type || alert.key || "?") + footer(stanceText);
   }
