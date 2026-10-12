@@ -1,11 +1,12 @@
 /**
  * Shared GRAM Swap core — pure logic only (no DOM, no localStorage, no Telegram).
  *
- * Professional swing-alert layer:
+ * Trading signal engine:
  *  - StrategyConfig (all thresholds in one place)
  *  - Position stance + worthwhile checks (slippage-aware)
  *  - Short-term momentum with volatility (noise) filter
- *  - Multi-timeframe range extremes (24h … 1y)
+ *  - Multi-timeframe range extremes (24h … 1y) + 3d
+ *  - analyzeTradeOpportunity() — explicit BUY/SELL + upside/downside projection
  *  - evaluateAlerts() — ranked, position-aware, cooldown-ready signals
  *  - Minimal risk helpers (stop distance, suggested size)
  */
@@ -49,15 +50,24 @@ export const DEFAULT_STRATEGY = Object.freeze({
   maxAlertsPerFamilyDay: 4,
   /** Suggested position fractions */
   sizeFractions: [0.25, 0.5, 1.0],
-  /** Multi-TF range analysis */
+  /** Multi-TF range analysis (includes 3d for short swing) */
   rangePeriods: Object.freeze([
     { id: "24h",  seconds: 86400,      label: "۲۴ ساعت", priority: 2, extremePctOfRange: 0.85, moveVsRange: 0.35 },
+    { id: "3d",   seconds: 259200,     label: "۳ روز",   priority: 2, extremePctOfRange: 0.86, moveVsRange: 0.32 },
     { id: "7d",   seconds: 604800,     label: "۷ روز",   priority: 2, extremePctOfRange: 0.88, moveVsRange: 0.30 },
     { id: "30d",  seconds: 2592000,    label: "۳۰ روز",  priority: 2, extremePctOfRange: 0.90, moveVsRange: 0.25 },
     { id: "90d",  seconds: 7776000,    label: "۳ ماه",   priority: 1, extremePctOfRange: 0.92, moveVsRange: 0.22 },
     { id: "180d", seconds: 15552000,   label: "۶ ماه",   priority: 1, extremePctOfRange: 0.93, moveVsRange: 0.20 },
     { id: "365d", seconds: 31536000,   label: "۱ سال",   priority: 1, extremePctOfRange: 0.95, moveVsRange: 0.18 },
   ]),
+  /** Explicit trade-signal thresholds */
+  trade: Object.freeze({
+    /** Min confidence (0–100) to emit BUY/SELL command */
+    minConfidence: 55,
+    /** Prefer short TF for target sizing */
+    shortIds: Object.freeze(["24h", "3d", "7d"]),
+    mediumIds: Object.freeze(["30d", "90d"]),
+  }),
   /** Cooldowns (ms) — consumers may still apply their own */
   cool: Object.freeze({
     reversal: 8 * 60 * 1000,
@@ -70,6 +80,8 @@ export const DEFAULT_STRATEGY = Object.freeze({
     /** Same profit/loss event must not re-fire for hours (prevents 1.5→2→2.5 spam) */
     profit: 3 * 60 * 60 * 1000,
     loss: 3 * 60 * 60 * 1000,
+    /** Explicit BUY/SELL command */
+    tradeSignal: 25 * 60 * 1000,
   }),
 });
 
@@ -684,6 +696,202 @@ export function analyzeMultiTimeframe(live, hist, cfg = DEFAULT_STRATEGY) {
   };
 }
 
+// ─── trade opportunity (explicit BUY / SELL + projection) ───
+
+/**
+ * Build a clear trading decision from multi-TF ranges + momentum + position.
+ *
+ * Returns:
+ *   action: "BUY" | "SELL" | "HOLD"
+ *   confidence: 0–100
+ *   targetUpPct / targetDownPct: estimated next move sizes (%)
+ *   targetUpPrice / targetDownPrice
+ *   horizon: main period label used for sizing
+ *   reasons: string[] (English keys for messaging layer)
+ *   periods: compact stats used
+ */
+export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT_STRATEGY) {
+  const empty = {
+    action: "HOLD",
+    confidence: 0,
+    targetUpPct: null,
+    targetDownPct: null,
+    targetUpPrice: null,
+    targetDownPrice: null,
+    horizon: null,
+    reasons: [],
+    periods: [],
+    scoreBuy: 0,
+    scoreSell: 0,
+  };
+  if (!live || !(live > 0)) return empty;
+
+  const periods = (mtf && mtf.periods) || [];
+  const okPeriods = periods.filter((p) => p.ok && p.high > 0 && p.low > 0 && p.range > 0);
+  if (!okPeriods.length && !(mom && mom.phase)) return empty;
+
+  const tradeCfg = cfg.trade || DEFAULT_STRATEGY.trade || {};
+  const shortIds = new Set(tradeCfg.shortIds || ["24h", "3d", "7d"]);
+  const mediumIds = new Set(tradeCfg.mediumIds || ["30d", "90d"]);
+
+  // Per-period projection: room to high / room to low
+  const stats = okPeriods.map((p) => {
+    const upPct = p.high > live ? ((p.high - live) / live) * 100 : 0;
+    const downPct = live > p.low ? ((live - p.low) / live) * 100 : 0;
+    return {
+      id: p.id,
+      label: p.label,
+      priority: p.priority,
+      posInRange: p.posInRange,
+      upPct,
+      downPct,
+      nearHigh: !!p.nearHigh,
+      nearLow: !!p.nearLow,
+      violentMove: !!p.violentMove,
+      moveDir: p.moveDir,
+      rangePct: p.rangePct,
+    };
+  });
+
+  // Weighted average upside / downside (short TF heavier)
+  let wUp = 0, wDown = 0, wSum = 0;
+  for (const s of stats) {
+    let w = s.priority >= 2 ? 2.5 : 1;
+    if (shortIds.has(s.id)) w *= 1.6;
+    else if (mediumIds.has(s.id)) w *= 1.15;
+    wUp += s.upPct * w;
+    wDown += s.downPct * w;
+    wSum += w;
+  }
+  const targetUpPct = wSum > 0 ? wUp / wSum : null;
+  const targetDownPct = wSum > 0 ? wDown / wSum : null;
+  const targetUpPrice = targetUpPct != null ? live * (1 + targetUpPct / 100) : null;
+  const targetDownPrice = targetDownPct != null ? live * (1 - targetDownPct / 100) : null;
+
+  // Primary horizon = shortest TF with meaningful range
+  const horizonRow =
+    stats.find((s) => shortIds.has(s.id) && s.rangePct >= 0.8) ||
+    stats.find((s) => shortIds.has(s.id)) ||
+    stats[0] ||
+    null;
+
+  // ── scoring ──
+  let scoreBuy = 0;
+  let scoreSell = 0;
+  const reasons = [];
+
+  // Position bias
+  const stance = positionStance(pos, live);
+  if (stance.action === "buy") {
+    scoreBuy += 12;
+    reasons.push("pos_usdt");
+  } else if (stance.action === "sell") {
+    scoreSell += 12;
+    reasons.push("pos_gram");
+  }
+
+  // Momentum phase
+  const phase = (mom && mom.phase) || "flat";
+  const strength = Math.abs((mom && mom.movePct) || 0);
+  if (phase === "reversal_up") {
+    scoreBuy += 28 + Math.min(12, strength * 2);
+    reasons.push("rev_up");
+  } else if (phase === "reversal_down") {
+    scoreSell += 28 + Math.min(12, strength * 2);
+    reasons.push("rev_down");
+  } else if (phase === "rally") {
+    scoreBuy += 8;
+    scoreSell += strength >= 1.5 ? 10 : 4; // extended rally → caution for holders
+    reasons.push("rally");
+  } else if (phase === "dump") {
+    scoreSell += 8;
+    scoreBuy += strength >= 1.5 ? 10 : 4;
+    reasons.push("dump");
+  }
+
+  // Range extremes confluence
+  let nearLowCount = 0, nearHighCount = 0;
+  for (const s of stats) {
+    if (s.nearLow) {
+      nearLowCount++;
+      const add = shortIds.has(s.id) ? 14 : 8;
+      scoreBuy += add;
+      reasons.push("near_low_" + s.id);
+    }
+    if (s.nearHigh) {
+      nearHighCount++;
+      const add = shortIds.has(s.id) ? 14 : 8;
+      scoreSell += add;
+      reasons.push("near_high_" + s.id);
+    }
+  }
+
+  // Violent moves
+  for (const s of stats) {
+    if (!s.violentMove) continue;
+    if (s.moveDir === "down") {
+      scoreBuy += shortIds.has(s.id) ? 10 : 5;
+      reasons.push("violent_drop_" + s.id);
+    } else if (s.moveDir === "up") {
+      scoreSell += shortIds.has(s.id) ? 10 : 5;
+      reasons.push("violent_rally_" + s.id);
+    }
+  }
+
+  // Asymmetry of room: more upside than downside favors buy (and vice versa)
+  if (targetUpPct != null && targetDownPct != null) {
+    if (targetUpPct > targetDownPct * 1.35 && targetUpPct >= 1.2) {
+      scoreBuy += 10;
+      reasons.push("asymm_up");
+    } else if (targetDownPct > targetUpPct * 1.35 && targetDownPct >= 1.2) {
+      scoreSell += 10;
+      reasons.push("asymm_down");
+    }
+  }
+
+  // Cap scores
+  scoreBuy = Math.min(100, Math.round(scoreBuy));
+  scoreSell = Math.min(100, Math.round(scoreSell));
+
+  let action = "HOLD";
+  let confidence = 0;
+  const minConf = tradeCfg.minConfidence != null ? tradeCfg.minConfidence : 55;
+
+  if (scoreBuy >= scoreSell && scoreBuy >= minConf) {
+    action = "BUY";
+    confidence = scoreBuy;
+  } else if (scoreSell > scoreBuy && scoreSell >= minConf) {
+    action = "SELL";
+    confidence = scoreSell;
+  } else {
+    confidence = Math.max(scoreBuy, scoreSell);
+  }
+
+  // Don't fight hard position lock for weak signals
+  if (action === "BUY" && stance.action === "sell" && confidence < 70) {
+    action = "HOLD";
+  }
+  if (action === "SELL" && stance.action === "buy" && confidence < 70) {
+    action = "HOLD";
+  }
+
+  return {
+    action,
+    confidence,
+    targetUpPct: targetUpPct != null ? +targetUpPct.toFixed(2) : null,
+    targetDownPct: targetDownPct != null ? +targetDownPct.toFixed(2) : null,
+    targetUpPrice: targetUpPrice != null ? +targetUpPrice.toFixed(6) : null,
+    targetDownPrice: targetDownPrice != null ? +targetDownPrice.toFixed(6) : null,
+    horizon: horizonRow ? horizonRow.label : null,
+    reasons,
+    periods: stats,
+    scoreBuy,
+    scoreSell,
+    phase,
+    stance: stance.mode,
+  };
+}
+
 // ─── unified alert evaluation ───
 
 /**
@@ -709,6 +917,7 @@ export function evaluateAlerts(ctx) {
     live,
     mom,
     mtf = null,
+    hist = null,
     lastTrade: lt = null,
     profitPcts = [],
     lossPcts = [],
@@ -725,6 +934,9 @@ export function evaluateAlerts(ctx) {
     : (mom && mom.from > 0 ? ((live - mom.from) / mom.from) * 100 : 0);
   const out = [];
 
+  // Explicit trade opportunity (BUY/SELL command)
+  const opportunity = analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg);
+
   const push = (item) => {
     out.push({
       urgent: false,
@@ -734,7 +946,26 @@ export function evaluateAlerts(ctx) {
     });
   };
 
-  // 0) Stop-loss (position has GRAM underwater)
+  // 0) Explicit BUY / SELL command from multi-TF + momentum analysis
+  if (opportunity.action === "BUY" || opportunity.action === "SELL") {
+    push({
+      key: "trade_" + opportunity.action.toLowerCase(),
+      family: "trade_signal",
+      type: opportunity.action === "BUY" ? "trade_buy" : "trade_sell",
+      urgent: opportunity.confidence >= 72,
+      priority: opportunity.confidence >= 72 ? 0 : 1,
+      payload: {
+        opportunity,
+        live,
+        stance,
+        from: mom && mom.from,
+        movePct: Math.abs(movePct),
+        phase: (mom && mom.phase) || "flat",
+      },
+    });
+  }
+
+  // 1) Stop-loss (position has GRAM underwater)
   if (stance.action === "sell" && isStopTriggered(pos, live, cfg)) {
     const pct = unrealizedPct(pos, live);
     push({
@@ -743,11 +974,11 @@ export function evaluateAlerts(ctx) {
       type: "stop_loss",
       urgent: true,
       priority: 0,
-      payload: { pct, avg: pos.avgBuyPrice, live, stance },
+      payload: { pct, avg: pos.avgBuyPrice, live, stance, opportunity },
     });
   }
 
-  // 1) Reversal (short-term, position-aligned)
+  // 2) Reversal (short-term, position-aligned) — keep as backup if trade_signal not fired
   if (stance.action === "sell" && mom && mom.phase === "reversal_down") {
     if (Math.abs(mom.delta) >= nAbs) {
       push({
@@ -755,8 +986,8 @@ export function evaluateAlerts(ctx) {
         family: "reversal",
         type: "reversal_sell",
         urgent: true,
-        priority: 1,
-        payload: { from: mom.from, live, delta: Math.abs(mom.delta), movePct: Math.abs(movePct), stance },
+        priority: 2,
+        payload: { from: mom.from, live, delta: Math.abs(mom.delta), movePct: Math.abs(movePct), stance, opportunity },
       });
     }
   }
@@ -767,20 +998,20 @@ export function evaluateAlerts(ctx) {
         family: "reversal",
         type: "reversal_buy",
         urgent: true,
-        priority: 1,
-        payload: { from: mom.from, live, movePct: Math.abs(movePct), stance },
+        priority: 2,
+        payload: { from: mom.from, live, movePct: Math.abs(movePct), stance, opportunity },
       });
     }
   }
 
-  // 2) Absolute ceiling / floor
+  // 3) Absolute ceiling / floor
   if (alertAbove != null && live >= alertAbove) {
     push({
       key: "above",
       family: "level",
       type: "ceiling",
-      priority: 2,
-      payload: { level: alertAbove, live, stance },
+      priority: 3,
+      payload: { level: alertAbove, live, stance, opportunity },
     });
   }
   if (alertBelow != null && live <= alertBelow) {
@@ -788,8 +1019,8 @@ export function evaluateAlerts(ctx) {
       key: "below",
       family: "level",
       type: "floor",
-      priority: 2,
-      payload: { level: alertBelow, live, stance },
+      priority: 3,
+      payload: { level: alertBelow, live, stance, opportunity },
     });
   }
 
@@ -951,6 +1182,7 @@ export function cooldownFor(alert, cfg = DEFAULT_STRATEGY) {
   const c = cfg.cool || DEFAULT_STRATEGY.cool;
   const fam = alert.family || "";
   if (fam === "stop") return c.stop;
+  if (fam === "trade_signal") return c.tradeSignal != null ? c.tradeSignal : 25 * 60 * 1000;
   if (fam === "reversal") return c.reversal;
   if (fam === "phase") return c.phase;
   if (fam === "range_high") return c.rangeHigh;
