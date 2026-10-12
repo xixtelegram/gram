@@ -27,6 +27,7 @@ import {
   buyIsWorthwhile,
   detectMomentum,
   analyzeMultiTimeframe,
+  analyzeTradeOpportunity,
   normalizePriceSeries,
   evaluateAlerts,
   cooldownFor,
@@ -321,6 +322,7 @@ async function main() {
     cexUsd: priceInfo.cexUsd,
   };
 
+  const oppPreview = analyzeTradeOpportunity(live, hist, mom, mtf, pos, STRATEGY);
   logEvent({
     event: "analysis",
     stance: stance.mode + "/" + stance.action,
@@ -331,6 +333,10 @@ async function main() {
     gram: pos.totalGram,
     usdt: pos.cashUsdt,
     mtfExtremes: (mtf.extremes || []).map((e) => e.kind + ":" + e.periodId),
+    tradeAction: oppPreview.action,
+    tradeConf: oppPreview.confidence,
+    targetUp: oppPreview.targetUpPct,
+    targetDown: oppPreview.targetDownPct,
   });
 
   const candidates = evaluateAlerts({
@@ -338,6 +344,7 @@ async function main() {
     live,
     mom,
     mtf,
+    hist,
     lastTrade: lt,
     profitPcts: PROFIT_PCTS,
     lossPcts: LOSS_PCTS,
