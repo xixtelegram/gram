@@ -1,29 +1,36 @@
 /**
  * GRAM Trader — UI app (render, events, wallet, chart, alerts wiring)
+ * Analysis always goes through gram-core + real GRAM price history (adaptive).
  */
 import {
   stanceLine as tgStanceLine,
   buildStatusMessage as tgBuildStatus,
   buildAdvice as tgBuildAdvice,
   stanceOf,
-  msgCeiling,
-  msgFloor,
-  msgProfitBuy,
-  msgLossBuy,
-  msgProfitSell,
-  msgLossSell,
-  msgRallyPrepare,
-  msgReversalSell,
-  msgDumpWatch,
-  msgReversalBuy,
+  alertStanceFooter,
+  renderAlertMessage,
   msgConnected,
   reconcileNote,
 } from "./telegram-messages.mjs";
+import {
+  DEFAULT_STRATEGY,
+  detectMomentum as coreDetectMomentum,
+  analyzeMultiTimeframe,
+  analyzeTradeOpportunity,
+  evaluateAlerts,
+  withMarketStats,
+  measureMarketStats,
+  normalizePriceSeries,
+  cooldownFor,
+  cooldownKeys,
+  noiseAbs as coreNoiseAbs,
+} from "./gram-core.mjs";
 
 // ROUND = safety margin on advice only (not P&L)
 const ROUND = 0.2, STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
 const SEED = [];
 const KEY = "gram_trades_v2", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1", WKEY = "gram_wallet_addr_v1", SERIESKEY = "gram_price_series_v1";
+const HISTKEY = "gram_price_hist_v1";
 const DEFAULT_WALLET = ""; // no default — user must paste their own address
 const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
 // Noise as fraction of price (1.2%); floor avoids zero at tiny prices
@@ -38,10 +45,70 @@ let walletAddr = loadWallet();
 let live = null, quote = null, cexPrice = null, dexPrice = null;
 let walletBal = null; // { ton, usdt, at } — source of truth for balances
 let tradeType = "buy", chartDays = 7, chartPts = [], confirmFn = null, fetching = false, syncing = false;
+/** Cached multi-day GRAM history from tonapi — refreshed in background */
+let priceHist = loadCachedHist();
+let priceHistAt = 0;
+let histFetching = false;
 
-function noiseAbs(price) {
+function noiseAbs(price, cfg) {
+  if (cfg) return coreNoiseAbs(price || live || 1, cfg);
   const p = price || live || 1;
   return Math.max(NOISE_FLOOR, p * NOISE_PCT);
+}
+
+function loadCachedHist() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HISTKEY) || "null");
+    if (raw && Array.isArray(raw.points) && raw.points.length) {
+      priceHistAt = raw.at || 0;
+      return normalizePriceSeries(raw.points);
+    }
+  } catch (_) {}
+  return [];
+}
+
+function saveCachedHist(pts) {
+  try {
+    localStorage.setItem(HISTKEY, JSON.stringify({
+      at: Date.now(),
+      points: (pts || []).map((x) => [x.t, x.p]),
+    }));
+  } catch (_) {}
+}
+
+/** Always prefer real multi-day GRAM series from tonapi for adaptive analysis */
+async function fetchPriceHistory(force) {
+  const maxAge = 20 * 60 * 1000; // 20 min
+  if (!force && priceHist.length >= 12 && Date.now() - priceHistAt < maxAge) {
+    return priceHist;
+  }
+  if (histFetching) return priceHist;
+  histFetching = true;
+  try {
+    const end = Math.floor(Date.now() / 1000);
+    const start = end - 365 * 86400;
+    const j = await fetchJson(
+      "https://tonapi.io/v2/rates/chart?token=ton&currency=usd&points_count=200&start_date=" + start + "&end_date=" + end,
+      20000
+    );
+    const pts = normalizePriceSeries(j.points || []);
+    if (pts.length >= 8) {
+      priceHist = pts;
+      priceHistAt = Date.now();
+      saveCachedHist(pts);
+    }
+  } catch (e) {
+    console.warn("GRAM history fetch failed:", e && e.message ? e.message : e);
+  } finally {
+    histFetching = false;
+  }
+  return priceHist;
+}
+
+/** Build adaptive strategy from real GRAM hist (or short live series fallback) */
+function adaptiveCfg(series) {
+  const marketSeries = (priceHist && priceHist.length >= 12) ? priceHist : (series || []);
+  return withMarketStats(DEFAULT_STRATEGY, marketSeries);
 }
 /** Simple constant-product slippage estimate for selling `gram` into pool */
 function estSlippagePct(gram) {
@@ -936,49 +1003,83 @@ const alertBootAt = Date.now();
 
 function maybeAlert(state) {
   if (!tg.enabled || !live || !tg.token || !tg.chatId) return false;
-  // Skip noisy boot (price retries + multiple render calls)
   if (Date.now() - alertBootAt < ALERT_BOOT_GRACE_MS) return false;
+  if (maybeAlert._inFlight) return false;
+
+  // Refresh multi-day GRAM history in background (adaptive analysis needs it)
+  fetchPriceHistory(false).catch(() => {});
 
   const series = pushPriceSample(live);
-  const mom = detectMomentum(series);
-  const stance = positionStance(state);
-  const above = Number(tg.alertAbove), below = Number(tg.alertBelow);
+  const cfg = adaptiveCfg(series);
+  const hist = (priceHist && priceHist.length >= 12) ? priceHist : series;
+  const mom = coreDetectMomentum(series, cfg);
+  const mtf = analyzeMultiTimeframe(live, hist, cfg);
+  const lt = lastTrade();
+  const above = Number(tg.alertAbove);
+  const below = Number(tg.alertBelow);
   const profitPcts = Array.isArray(tg.alertTargetPcts) ? tg.alertTargetPcts : [];
   const lossPcts = Array.isArray(tg.alertLossPcts) ? tg.alertLossPcts : [];
+
   let mem = null;
   try { mem = JSON.parse(localStorage.getItem(MEMKEY) || "null"); } catch (_) {}
   if (!mem || typeof mem !== "object") mem = {};
   const now = Date.now();
-  const cool = 20 * 60 * 1000;       // سقف‌کف
-  const coolPhase = 18 * 60 * 1000;  // rally / dump
-  const coolRev = 8 * 60 * 1000;     // برگشت روند
-  const coolProfit = 3 * 60 * 60 * 1000; // سود/ضرر — جلوگیری از اسپم آستانه‌ها
-  const recently = (k, c) => mem[k] && now - mem[k] < (c || cool);
-  // Global gap: at most one Telegram message every ALERT_GLOBAL_GAP_MS
-  // استثنا: برگشت فوری می‌تواند gap را کمی بشکند (نیمه gap)
-  const isUrgentPhase =
-    (mom.phase === "reversal_down" && stance.action === "sell") ||
-    (mom.phase === "reversal_up" && stance.action === "buy");
-  const gapMs = isUrgentPhase ? Math.min(ALERT_GLOBAL_GAP_MS, 45 * 1000) : ALERT_GLOBAL_GAP_MS;
-  if (mem._lastAny && now - mem._lastAny < gapMs) return false;
-  if (maybeAlert._inFlight) return false;
-  const mark = (k) => {
-    mem[k] = now;
+
+  const recently = (k, c) => mem[k] && now - mem[k] < (c || 20 * 60 * 1000);
+  const markKeys = (keys) => {
+    for (const k of keys) mem[k] = now;
     mem._lastAny = now;
-    // family locks so 1.5% → 2% → 2.5% cannot cascade
-    if (String(k).startsWith("ls_profit")) mem.fam_profit = now;
-    if (String(k).startsWith("ls_loss")) mem.fam_loss = now;
     try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
   };
-  /** Soft-lock gap while request is in flight; full key mark only after success */
-  const sendOne = (key, msg, okToast) => {
+
+  // Global gap
+  const isUrgent =
+    (mom.phase === "reversal_down" || mom.phase === "reversal_up") ||
+    (mom.confirmed === true);
+  const gapMs = isUrgent ? Math.min(ALERT_GLOBAL_GAP_MS, 45 * 1000) : ALERT_GLOBAL_GAP_MS;
+  if (mem._lastAny && now - mem._lastAny < gapMs) return false;
+
+  const candidates = evaluateAlerts({
+    pos: state,
+    live,
+    mom,
+    mtf,
+    hist,
+    lastTrade: lt,
+    profitPcts,
+    lossPcts,
+    alertAbove: above > 0 ? above : null,
+    alertBelow: below > 0 ? below : null,
+    poolTonReserve,
+    cfg,
+  });
+
+  if (!candidates || !candidates.length) return false;
+
+  const stanceText = alertStanceFooter(state, live);
+
+  for (const alert of candidates) {
+    const keys = cooldownKeys(alert);
+    const coolMs = cooldownFor(alert, cfg);
+    if (keys.some((k) => recently(k, coolMs))) continue;
+    // family locks for profit/loss cascade
+    if (alert.family === "profit" && recently("fam_profit", coolMs)) continue;
+    if (alert.family === "loss" && recently("fam_loss", coolMs)) continue;
+
+    const msg = renderAlertMessage(alert, stanceText);
+    if (!msg) continue;
+
     maybeAlert._inFlight = true;
     mem._lastAny = now;
     try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
+
     sendTelegram(msg)
       .then(() => {
-        mark(key);
-        if (okToast) toast(okToast);
+        const allKeys = keys.slice();
+        if (alert.family === "profit") allKeys.push("fam_profit");
+        if (alert.family === "loss") allKeys.push("fam_loss");
+        markKeys(allKeys);
+        toast("هشدار ارسال شد");
       })
       .catch(() => {
         if (mem._lastAny === now) delete mem._lastAny;
@@ -987,102 +1088,7 @@ function maybeAlert(state) {
       })
       .finally(() => { maybeAlert._inFlight = false; });
     return true;
-  };
-
-  const stText = () => stanceLine(stance, state, live);
-  const nAbs = mom.noise || noiseAbs(live);
-  const movePct = mom.movePct != null ? mom.movePct : (mom.from > 0 ? ((live - mom.from) / mom.from) * 100 : 0);
-
-  // ── Priority 0: برگشت روند (فوری) — وابسته به پوزیشن واقعی ──
-  if (stance.action === "sell" && mom.phase === "reversal_down" && !recently("phase_rev_sell", coolRev)) {
-    if (Math.abs(mom.delta) >= nAbs) {
-      return sendOne(
-        "phase_rev_sell",
-        msgReversalSell(mom.from, live, Math.abs(mom.delta), Math.abs(movePct), stText()),
-        "هشدار: ریزش بعد از رشد"
-      );
-    }
   }
-  if (stance.action === "buy" && mom.phase === "reversal_up" && !recently("phase_rev_buy", coolRev)) {
-    if (Math.abs(mom.delta) >= nAbs) {
-      return sendOne(
-        "phase_rev_buy",
-        msgReversalBuy(mom.from, live, Math.abs(movePct), stText()),
-        "هشدار: برگشت برای خرید"
-      );
-    }
-  }
-
-  // ── Priority 1: سقف / کف دستی ──
-  if (above > 0 && live >= above && !recently("above")) {
-    return sendOne("above", msgCeiling(above, live, stText()), "هشدار سقف قیمت");
-  }
-  if (below > 0 && live <= below && !recently("below")) {
-    return sendOne("below", msgFloor(below, live, stText()), "هشدار کف قیمت");
-  }
-
-  // ── Priority 2: درصد نسبت به آخرین سواپ — فقط قوی‌ترین آستانه + cooldown خانوادگی ──
-  const lt = lastTrade();
-  if (lt && lt.price > 0) {
-    const ref = lt.price;
-    const vsSwap = ((live - ref) / ref) * 100;
-    const profits = (profitPcts || []).filter((x) => x > 0).slice().sort((a, b) => a - b);
-    const losses = (lossPcts || []).filter((x) => x > 0).slice().sort((a, b) => a - b);
-
-    if (stance.action === "sell" && lt.type === "buy") {
-      if (!recently("fam_profit", coolProfit) && !recently("ls_profit_buy", coolProfit)) {
-        let best = null;
-        for (const t of profits) { if (vsSwap >= t) best = t; }
-        if (best != null) {
-          return sendOne("ls_profit_buy", msgProfitBuy(vsSwap, best, ref, live, stText()), "هشدار هدف سود");
-        }
-      }
-      if (!recently("fam_loss", coolProfit) && !recently("ls_loss_buy", coolProfit)) {
-        let best = null;
-        for (const t of losses) { if (vsSwap <= -t) best = t; }
-        if (best != null) {
-          return sendOne("ls_loss_buy", msgLossBuy(vsSwap, best, ref, live, stText()), "هشدار افت از خرید");
-        }
-      }
-    }
-    if (stance.action === "buy" && lt.type === "sell") {
-      if (!recently("fam_profit", coolProfit) && !recently("ls_profit_sell", coolProfit)) {
-        let best = null;
-        for (const t of profits) { if (vsSwap <= -t) best = t; }
-        if (best != null) {
-          return sendOne("ls_profit_sell", msgProfitSell(vsSwap, best, ref, live, stText()), "هشدار فرصت خرید");
-        }
-      }
-      if (!recently("fam_loss", coolProfit) && !recently("ls_loss_sell", coolProfit)) {
-        let best = null;
-        for (const t of losses) { if (vsSwap >= t) best = t; }
-        if (best != null) {
-          return sendOne("ls_loss_sell", msgLossSell(vsSwap, best, ref, live, stText()), "هشدار رشد بعد از فروش");
-        }
-      }
-    }
-  }
-
-  // ── Priority 3: ادامه روند — آماده‌باش (اسپم کم) ──
-  if (stance.action === "sell" && mom.phase === "rally" && !recently("phase_rally", coolPhase)) {
-    if (Math.abs(mom.delta) >= nAbs || mom.strength >= 0.6) {
-      return sendOne(
-        "phase_rally",
-        msgRallyPrepare(mom.from, live, Math.abs(movePct), stText()),
-        "آماده‌باش: رشد GRAM"
-      );
-    }
-  }
-  if (stance.action === "buy" && mom.phase === "dump" && !recently("phase_dump", coolPhase)) {
-    if (Math.abs(mom.delta) >= nAbs || mom.strength >= 0.6) {
-      return sendOne(
-        "phase_dump",
-        msgDumpWatch(mom.from, live, Math.abs(movePct), stText()),
-        "حواست باشد: ریزش قیمت"
-      );
-    }
-  }
-
   return false;
 }
 
@@ -1385,7 +1391,11 @@ async function refreshPrice(force) {
   const btn = document.getElementById("btnPrice");
   if (btn) btn.disabled = true;
   try {
-    await getPrice(!!force);
+    // Always keep multi-day GRAM history warm for adaptive analysis
+    await Promise.all([
+      getPrice(!!force),
+      fetchPriceHistory(!!force),
+    ]);
     try { paintPrice(); } catch (_) {}
     try { render(); } catch (re) { console.error(re); }
   } catch (e) {
