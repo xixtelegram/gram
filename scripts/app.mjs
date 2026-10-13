@@ -30,6 +30,7 @@ import {
 const ROUND = 0.2, STON = "EQCGScrZe1xbyWqWDvdI6mzP-GAcAWFv6ZXuaJOuSqemxku4";
 const SEED = [];
 const KEY = "gram_trades_v2", TGKEY = "gram_telegram_v1", MEMKEY = "gram_alert_mem_v1", PKEY = "gram_price_cache_v1", WKEY = "gram_wallet_addr_v1", SERIESKEY = "gram_price_series_v1";
+const WALLETS_KEY = "gram_wallets_v1";
 const HISTKEY = "gram_price_hist_v1";
 const DEFAULT_WALLET = ""; // no default — user must paste their own address
 const USDT_MASTER = "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe";
@@ -41,14 +42,84 @@ let poolTonReserve = 1.7e6;
 
 let trades = loadTrades();
 let tg = loadTg();
-let walletAddr = loadWallet();
+/** @type {{ wallets: Array<{id:string,name:string,address:string}>, activeId: string|null }} */
+let walletStore = loadWallets();
 let live = null, quote = null, cexPrice = null, dexPrice = null;
-let walletBal = null; // { ton, usdt, at } — source of truth for balances
+/** Per-wallet balances: id -> { ton, usdt, at } */
+let walletBalances = {};
 let tradeType = "buy", chartDays = 7, chartPts = [], confirmFn = null, fetching = false, syncing = false;
 /** Cached multi-day GRAM history from tonapi — refreshed in background */
 let priceHist = loadCachedHist();
 let priceHistAt = 0;
 let histFetching = false;
+/** When editing an existing wallet in the sheet */
+let editingWalletId = null;
+
+function uid() {
+  return "w_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
+}
+function loadWallets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WALLETS_KEY) || "null");
+    if (raw && Array.isArray(raw.wallets)) {
+      return {
+        wallets: raw.wallets.filter((w) => w && w.address).map((w) => ({
+          id: w.id || uid(),
+          name: (w.name || "ولت").trim() || "ولت",
+          address: String(w.address).trim(),
+        })),
+        activeId: raw.activeId || (raw.wallets[0] && raw.wallets[0].id) || null,
+      };
+    }
+  } catch (_) {}
+  // migrate legacy single address
+  let legacy = "";
+  try { legacy = localStorage.getItem(WKEY) || ""; } catch (_) {}
+  if (legacy && legacy.trim().length >= 40) {
+    const id = uid();
+    const store = { wallets: [{ id, name: "اصلی", address: legacy.trim() }], activeId: id };
+    try { localStorage.setItem(WALLETS_KEY, JSON.stringify(store)); } catch (_) {}
+    return store;
+  }
+  return { wallets: [], activeId: null };
+}
+function saveWallets() {
+  try { localStorage.setItem(WALLETS_KEY, JSON.stringify(walletStore)); } catch (_) {}
+  // keep legacy key in sync with active wallet for older tools
+  const a = getActiveWallet();
+  try { localStorage.setItem(WKEY, a ? a.address : ""); } catch (_) {}
+}
+function getActiveWallet() {
+  if (!walletStore.wallets.length) return null;
+  let w = walletStore.wallets.find((x) => x.id === walletStore.activeId);
+  if (!w) w = walletStore.wallets[0];
+  return w || null;
+}
+function getActiveWalletId() {
+  const w = getActiveWallet();
+  return w ? w.id : null;
+}
+/** Trades belonging to active wallet (untagged treated as active for migration) */
+function tradesForWallet(walletId) {
+  const id = walletId || getActiveWalletId();
+  if (!id) return trades.slice();
+  return trades.filter((t) => !t.walletId || t.walletId === id);
+}
+function walletBalFor(walletId) {
+  const id = walletId || getActiveWalletId();
+  return id ? (walletBalances[id] || null) : null;
+}
+function activeWalletAddress() {
+  const w = getActiveWallet();
+  return w ? w.address : "";
+}
+function activeWalletName() {
+  const w = getActiveWallet();
+  return w ? w.name : "";
+}
+function activeWalletBal() {
+  return walletBalFor(getActiveWalletId());
+}
 
 function noiseAbs(price, cfg) {
   if (cfg) return coreNoiseAbs(price || live || 1, cfg);
@@ -154,12 +225,55 @@ function loadTrades() {
   } catch { return SEED.slice(); }
 }
 function saveTrades() { localStorage.setItem(KEY, JSON.stringify(trades)); }
-function loadWallet() {
-  try { return localStorage.getItem(WKEY) || ""; } catch { return ""; }
+function upsertWallet(name, address, id) {
+  const addr = (address || "").trim().replace(/\s+/g, "");
+  const nm = (name || "").trim() || "ولت";
+  if (!addr || addr.length < 40) {
+    toast("آدرس کیف‌پول معتبر وارد کن");
+    return null;
+  }
+  if (id) {
+    const w = walletStore.wallets.find((x) => x.id === id);
+    if (w) {
+      w.name = nm;
+      w.address = addr;
+      saveWallets();
+      return w;
+    }
+  }
+  const dup = walletStore.wallets.find((x) => x.address.toLowerCase() === addr.toLowerCase());
+  if (dup) {
+    dup.name = nm;
+    walletStore.activeId = dup.id;
+    saveWallets();
+    return dup;
+  }
+  const w = { id: uid(), name: nm, address: addr };
+  walletStore.wallets.push(w);
+  walletStore.activeId = w.id;
+  saveWallets();
+  return w;
 }
-function saveWallet(a) {
-  walletAddr = (a || "").trim();
-  localStorage.setItem(WKEY, walletAddr);
+function removeWallet(id) {
+  walletStore.wallets = walletStore.wallets.filter((x) => x.id !== id);
+  delete walletBalances[id];
+  if (walletStore.activeId === id) {
+    walletStore.activeId = walletStore.wallets[0] ? walletStore.wallets[0].id : null;
+  }
+  saveWallets();
+}
+function setActiveWallet(id) {
+  if (!walletStore.wallets.some((x) => x.id === id)) return;
+  walletStore.activeId = id;
+  saveWallets();
+  editingWalletId = null;
+  const w = getActiveWallet();
+  const nameEl = document.getElementById("walletName");
+  const addrEl = document.getElementById("walletAddr");
+  if (nameEl) nameEl.value = w ? w.name : "";
+  if (addrEl) addrEl.value = w ? w.address : "";
+  renderWalletList();
+  render();
 }
 function toLocalDatetime(iso) {
   const d = new Date(iso);
@@ -298,7 +412,7 @@ async function fetchWalletSwaps(addr, maxPages) {
   }
   return parseSwapsFromEvents(all);
 }
-async function fetchWalletBalances(addr) {
+async function fetchWalletBalances(addr, walletId) {
   const acc = await fetchJson("https://tonapi.io/v2/accounts/" + encodeURIComponent(addr), 12000);
   const ton = Number(acc.balance || 0) / 1e9;
   let usdt = 0;
@@ -309,102 +423,139 @@ async function fetchWalletBalances(addr) {
       if (isUsdt(j)) usdt += Number(b.balance || 0) / Math.pow(10, j.decimals || 6);
     }
   } catch (_) {}
-  walletBal = { ton, usdt, at: Date.now() };
-  return walletBal;
+  const bal = { ton, usdt, at: Date.now() };
+  if (walletId) walletBalances[walletId] = bal;
+  return bal;
 }
+
+/** Sync one wallet by id (or active). Tags trades with walletId. */
+async function syncWalletById(walletId, opts) {
+  const quiet = opts && opts.quiet;
+  const w = walletStore.wallets.find((x) => x.id === walletId) || getActiveWallet();
+  if (!w || !w.address) {
+    if (!quiet) toast("اول یک ولت ذخیره کن");
+    return null;
+  }
+  const addr = w.address.trim().replace(/\s+/g, "");
+  if (addr.length < 40) {
+    if (!quiet) toast("آدرس کیف‌پول نامعتبر است");
+    return null;
+  }
+  const meta = document.getElementById("walletSyncMeta");
+  if (meta && !quiet) meta.textContent = "همگام «" + w.name + "»…";
+  let bal = null;
+  try { bal = await fetchWalletBalances(addr, w.id); } catch (_) {}
+  const remote = await fetchWalletSwaps(addr, 3);
+  const existingIds = new Set(
+    trades.filter((t) => t.eventId && (!t.walletId || t.walletId === w.id)).map((t) => t.eventId)
+  );
+  let added = 0, updated = 0;
+  for (const s of remote) {
+    if (s.eventId && existingIds.has(s.eventId)) {
+      const ex = trades.find((t) => t.eventId === s.eventId && (!t.walletId || t.walletId === w.id));
+      if (ex) {
+        ex.gram = s.gram; ex.usdt = s.usdt; ex.gramSwapped = s.gramSwapped;
+        ex.price = s.usdt / (s.gramSwapped || s.gram || 1);
+        ex.networkFee = s.networkFee || 0; ex.dexFeeUsdt = s.dexFeeUsdt || 0;
+        ex.exact = true; ex.source = "wallet"; ex.walletId = w.id;
+        updated++;
+      }
+      continue;
+    }
+    const match = trades.find((t) =>
+      (!t.walletId || t.walletId === w.id) &&
+      !t.eventId && t.type === s.type &&
+      Math.abs(new Date(t.date) - new Date(s.date)) < 3600e3 &&
+      Math.abs(t.gram - s.gram) / s.gram < 0.03 &&
+      Math.abs(t.usdt - s.usdt) / s.usdt < 0.03
+    );
+    if (match) {
+      match.eventId = s.eventId;
+      match.source = "wallet";
+      match.exact = true;
+      match.walletId = w.id;
+      match.gram = s.gram;
+      match.usdt = s.usdt;
+      match.gramSwapped = s.gramSwapped;
+      match.price = s.usdt / (s.gramSwapped || s.gram || 1);
+      match.networkFee = s.networkFee || 0;
+      match.dexFeeUsdt = s.dexFeeUsdt || 0;
+      delete match.dexFeePct;
+      updated++;
+      continue;
+    }
+    trades.push({
+      id: Date.now() + added,
+      type: s.type,
+      date: s.date,
+      gram: s.gram,
+      gramSwapped: s.gramSwapped,
+      usdt: s.usdt,
+      networkFee: s.networkFee || 0,
+      dexFeeUsdt: s.dexFeeUsdt || 0,
+      exact: true,
+      price: s.usdt / (s.gramSwapped || s.gram || 1),
+      eventId: s.eventId,
+      source: "wallet",
+      walletId: w.id,
+    });
+    existingIds.add(s.eventId);
+    added++;
+  }
+  trades.sort((a, b) => new Date(a.date) - new Date(b.date));
+  saveTrades();
+  return { wallet: w, bal, remote, added, updated };
+}
+
 async function syncWallet(force) {
   if (syncing) {
-    // allow manual retry after 2s if previous hung
     if (!syncWallet._since || Date.now() - syncWallet._since < 2000) return;
     syncing = false;
   }
-  const addr = (document.getElementById("walletAddr").value || walletAddr || "").trim().replace(/\s+/g, "");
-  if (!addr || addr.length < 40) { toast("آدرس کیف‌پول را وارد کن"); return; }
-  saveWallet(addr);
+  // Save form fields into active/editing wallet first
+  const nameEl = document.getElementById("walletName");
+  const addrEl = document.getElementById("walletAddr");
+  const name = nameEl ? nameEl.value : "";
+  const addr = addrEl ? addrEl.value : "";
+  if (addr && addr.trim().length >= 40) {
+    const w = upsertWallet(name, addr, editingWalletId || getActiveWalletId());
+    if (w) {
+      editingWalletId = null;
+      walletStore.activeId = w.id;
+      saveWallets();
+    }
+  }
+  const active = getActiveWallet();
+  if (!active) { toast("اول یک ولت اضافه کن"); return; }
   syncing = true;
   syncWallet._since = Date.now();
   const meta = document.getElementById("walletSyncMeta");
-  if (meta) meta.textContent = "در حال خواندن تاریخچه و موجودی…";
+  if (meta) meta.textContent = "در حال خواندن «" + active.name + "»…";
   try {
-    let bal = null;
-    try { bal = await fetchWalletBalances(addr); } catch (_) {}
-    const remote = await fetchWalletSwaps(addr, 3);
+    const result = await syncWalletById(active.id, { quiet: false });
+    if (!result) { render(); return; }
+    const { bal, remote, added, updated, wallet } = result;
     if (!remote.length) {
       if (meta) {
         meta.textContent = bal
-          ? ("سواپی یافت نشد · زنجیره: " + fmt(bal.ton, 4) + " GRAM · " + fmt(bal.usdt, 2) + " USDT")
-          : "سواپی یافت نشد";
+          ? ("«" + wallet.name + "» · سواپی یافت نشد · " + fmt(bal.ton, 4) + " GRAM · " + fmt(bal.usdt, 2) + " USDT")
+          : ("«" + wallet.name + "» · سواپی یافت نشد");
       }
-      toast("سواپ GRAM/USDT در تاریخچه پیدا نشد");
+      toast("سواپ GRAM/USDT در «" + wallet.name + "» پیدا نشد");
       render();
       return;
     }
-    // merge: keep manual trades, add/update wallet ones by eventId or close date+amounts
-    const existingIds = new Set(trades.filter((t) => t.eventId).map((t) => t.eventId));
-    let added = 0, updated = 0;
-    for (const s of remote) {
-      if (s.eventId && existingIds.has(s.eventId)) {
-        // refresh exact fields on existing wallet trade
-        const ex = trades.find((t) => t.eventId === s.eventId);
-        if (ex) {
-          ex.gram = s.gram; ex.usdt = s.usdt; ex.gramSwapped = s.gramSwapped;
-          ex.price = s.usdt / (s.gramSwapped || s.gram || 1);
-          ex.networkFee = s.networkFee || 0; ex.dexFeeUsdt = s.dexFeeUsdt || 0;
-          ex.exact = true; ex.source = "wallet";
-          updated++;
-        }
-        continue;
-      }
-      // fuzzy match existing manual entry → upgrade to exact wallet data
-      const match = trades.find((t) => !t.eventId && t.type === s.type &&
-        Math.abs(new Date(t.date) - new Date(s.date)) < 3600e3 &&
-        Math.abs(t.gram - s.gram) / s.gram < 0.03 &&
-        Math.abs(t.usdt - s.usdt) / s.usdt < 0.03);
-      if (match) {
-        match.eventId = s.eventId;
-        match.source = "wallet";
-        match.exact = true;
-        match.gram = s.gram;
-        match.usdt = s.usdt;
-        match.gramSwapped = s.gramSwapped;
-        match.price = s.usdt / (s.gramSwapped || s.gram || 1);
-        match.networkFee = s.networkFee || 0;
-        match.dexFeeUsdt = s.dexFeeUsdt || 0;
-        delete match.dexFeePct;
-        updated++;
-        continue;
-      }
-      trades.push({
-        id: Date.now() + added,
-        type: s.type,
-        date: s.date,
-        gram: s.gram,
-        gramSwapped: s.gramSwapped,
-        usdt: s.usdt,
-        networkFee: s.networkFee || 0,
-        dexFeeUsdt: s.dexFeeUsdt || 0,
-        exact: true,
-        price: s.usdt / (s.gramSwapped || s.gram || 1),
-        eventId: s.eventId,
-        source: "wallet"
-      });
-      existingIds.add(s.eventId);
-      added++;
-    }
-    // sort by date ascending
-    trades.sort((a, b) => new Date(a.date) - new Date(b.date));
-    saveTrades();
     try { render(); } catch (re) { console.error("render after sync", re); }
     let balTxt = "";
     if (bal) {
       balTxt = " · زنجیره: " + fmt(bal.ton, 4) + " GRAM / " + fmt(bal.usdt, 2) + " USDT";
-      const s = calcState(trades, live);
+      const s = calcState(tradesForWallet(wallet.id), live, bal);
       if (s.bookGram != null && Math.abs(s.bookGram - bal.ton) > 0.5) {
         balTxt += " · دفتر سواپ " + fmt(s.bookGram, 4) + " GRAM";
       }
     }
-    if (meta) meta.textContent = remote.length + " سواپ · +" + added + " · ↻" + updated + balTxt;
-    toast(added ? (added + " سواپ جدید اضافه شد") : (updated ? "سواپ‌ها به‌روز شدند" : "همه سواپ‌ها قبلاً ثبت شده‌اند"));
+    if (meta) meta.textContent = "«" + wallet.name + "» · " + remote.length + " سواپ · +" + added + " · ↻" + updated + balTxt;
+    toast(added ? ("«" + wallet.name + "»: " + added + " سواپ جدید") : (updated ? ("«" + wallet.name + "» به‌روز شد") : ("«" + wallet.name + "»: همه ثبت بود")));
   } catch (err) {
     console.error(err);
     const msg = (err && err.message) ? String(err.message) : "خطای ناشناخته";
@@ -460,12 +611,12 @@ function equityAt(cash, inv, price) {
 
 /**
  * Trade ledger + wallet balances.
- * Balances shown = on-chain when walletBal is set; else inferred from trades.
+ * Balances shown = on-chain when bal override or active wallet bal is set.
  * PnL = realized (closed swaps) + unrealized (open cost vs mark).
- * No "starting capital".
  */
-function calcState(list, price) {
-  const sorted = list.slice().sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+function calcState(list, price, balOverride) {
+  const walletBal = balOverride !== undefined ? balOverride : activeWalletBal();
+  const sorted = (list || []).slice().sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
   let totalFeesGram = 0, totalFeesUsdt = 0, realizedPnl = 0;
   const inv = [];
   let lastSwapPnl = null, lastSwapPct = null, lastSwapType = null, lastSwapPrice = null;
@@ -535,10 +686,16 @@ function calcState(list, price) {
   };
 }
 
-/** Last swap from ledger (most recent by date) */
-function lastTrade() {
-  if (!trades.length) return null;
-  return trades.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id)[0];
+/** Last swap from active wallet ledger (most recent by date) */
+function lastTrade(walletId) {
+  const list = tradesForWallet(walletId);
+  if (!list.length) return null;
+  return list.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id)[0];
+}
+/** State for active wallet (or given id) */
+function activeState(price) {
+  const id = getActiveWalletId();
+  return calcState(tradesForWallet(id), price, walletBalFor(id));
 }
 
 /** UI advice card — text only from telegram-messages.buildAdvice */
@@ -1006,7 +1163,6 @@ function maybeAlert(state) {
   if (Date.now() - alertBootAt < ALERT_BOOT_GRACE_MS) return false;
   if (maybeAlert._inFlight) return false;
 
-  // Refresh multi-day GRAM history in background (adaptive analysis needs it)
   fetchPriceHistory(false).catch(() => {});
 
   const series = pushPriceSample(live);
@@ -1014,7 +1170,6 @@ function maybeAlert(state) {
   const hist = (priceHist && priceHist.length >= 12) ? priceHist : series;
   const mom = coreDetectMomentum(series, cfg);
   const mtf = analyzeMultiTimeframe(live, hist, cfg);
-  const lt = lastTrade();
   const above = Number(tg.alertAbove);
   const below = Number(tg.alertBelow);
   const profitPcts = Array.isArray(tg.alertTargetPcts) ? tg.alertTargetPcts : [];
@@ -1032,62 +1187,68 @@ function maybeAlert(state) {
     try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
   };
 
-  // Global gap
-  const isUrgent =
-    (mom.phase === "reversal_down" || mom.phase === "reversal_up") ||
-    (mom.confirmed === true);
-  const gapMs = isUrgent ? Math.min(ALERT_GLOBAL_GAP_MS, 45 * 1000) : ALERT_GLOBAL_GAP_MS;
-  if (mem._lastAny && now - mem._lastAny < gapMs) return false;
+  if (mem._lastAny && now - mem._lastAny < ALERT_GLOBAL_GAP_MS) return false;
 
-  const candidates = evaluateAlerts({
-    pos: state,
-    live,
-    mom,
-    mtf,
-    hist,
-    lastTrade: lt,
-    profitPcts,
-    lossPcts,
-    alertAbove: above > 0 ? above : null,
-    alertBelow: below > 0 ? below : null,
-    poolTonReserve,
-    cfg,
-  });
+  // Evaluate every wallet separately (or one synthetic active if none)
+  const walletTargets = walletStore.wallets.length
+    ? walletStore.wallets.slice()
+    : [{ id: "_none", name: "بدون ولت", address: "" }];
 
-  if (!candidates || !candidates.length) return false;
+  for (const w of walletTargets) {
+    const pos = w.id === "_none"
+      ? state
+      : calcState(tradesForWallet(w.id), live, walletBalFor(w.id));
+    const lt = lastTrade(w.id === "_none" ? null : w.id);
+    const candidates = evaluateAlerts({
+      pos,
+      live,
+      mom,
+      mtf,
+      hist,
+      lastTrade: lt,
+      profitPcts,
+      lossPcts,
+      alertAbove: above > 0 ? above : null,
+      alertBelow: below > 0 ? below : null,
+      poolTonReserve,
+      cfg,
+    });
+    if (!candidates || !candidates.length) continue;
 
-  const stanceText = alertStanceFooter(state, live);
+    const prefix = w.id !== "_none" ? ("💳 ولت: " + w.name + "\n\n") : "";
+    const stanceText = alertStanceFooter(pos, live);
 
-  for (const alert of candidates) {
-    const keys = cooldownKeys(alert);
-    const coolMs = cooldownFor(alert, cfg);
-    if (keys.some((k) => recently(k, coolMs))) continue;
-    // family locks for profit/loss cascade
-    if (alert.family === "profit" && recently("fam_profit", coolMs)) continue;
-    if (alert.family === "loss" && recently("fam_loss", coolMs)) continue;
+    for (const alert of candidates) {
+      const keys = cooldownKeys(alert).map((k) => w.id + ":" + k);
+      const coolMs = cooldownFor(alert, cfg);
+      if (keys.some((k) => recently(k, coolMs))) continue;
+      if (alert.family === "profit" && recently(w.id + ":fam_profit", coolMs)) continue;
+      if (alert.family === "loss" && recently(w.id + ":fam_loss", coolMs)) continue;
 
-    const msg = renderAlertMessage(alert, stanceText);
-    if (!msg) continue;
+      const body = renderAlertMessage(alert, stanceText);
+      if (!body) continue;
+      const msg = prefix + body;
 
-    maybeAlert._inFlight = true;
-    mem._lastAny = now;
-    try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
+      maybeAlert._inFlight = true;
+      mem._lastAny = now;
+      try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
 
-    sendTelegram(msg)
-      .then(() => {
-        const allKeys = keys.slice();
-        if (alert.family === "profit") allKeys.push("fam_profit");
-        if (alert.family === "loss") allKeys.push("fam_loss");
-        markKeys(allKeys);
-        toast("هشدار ارسال شد");
-      })
-      .catch(() => {
-        if (mem._lastAny === now) delete mem._lastAny;
-        try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
-        toast("هشدار ارسال نشد");
-      })
-      .finally(() => { maybeAlert._inFlight = false; });
-    return true;
+      sendTelegram(msg)
+        .then(() => {
+          const allKeys = keys.slice();
+          if (alert.family === "profit") allKeys.push(w.id + ":fam_profit");
+          if (alert.family === "loss") allKeys.push(w.id + ":fam_loss");
+          markKeys(allKeys);
+          toast("هشدار «" + w.name + "» ارسال شد");
+        })
+        .catch(() => {
+          if (mem._lastAny === now) delete mem._lastAny;
+          try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
+          toast("هشدار ارسال نشد");
+        })
+        .finally(() => { maybeAlert._inFlight = false; });
+      return true; // one message per cycle
+    }
   }
   return false;
 }
@@ -1100,8 +1261,70 @@ function stat(label, value, sub, tone) {
     + '</div>';
 }
 
+function renderWalletList() {
+  const list = document.getElementById("walletList");
+  if (!list) return;
+  if (!walletStore.wallets.length) {
+    list.innerHTML = '<p class="muted" style="margin:0;font-size:13px">هنوز ولتی ثبت نشده — نام و آدرس را پایین وارد کن.</p>';
+    return;
+  }
+  list.innerHTML = walletStore.wallets.map((w) => {
+    const active = w.id === walletStore.activeId;
+    const short = w.address.length > 18 ? w.address.slice(0, 8) + "…" + w.address.slice(-6) : w.address;
+    return '<div class="wallet-item' + (active ? ' is-active' : '') + '" data-wid="' + w.id + '" role="listitem">'
+      + '<div class="wallet-item-body">'
+      + '<div class="wallet-item-name">' + escapeHtml(w.name)
+      + (active ? ' <span class="wallet-active-badge">فعال</span>' : '')
+      + '</div>'
+      + '<div class="wallet-item-addr" dir="ltr">' + escapeHtml(short) + '</div>'
+      + '</div>'
+      + '<div class="wallet-item-actions">'
+      + '<button type="button" class="btn btn-ghost" data-act="edit" data-wid="' + w.id + '">ویرایش</button>'
+      + '<button type="button" class="btn btn-ghost" data-act="del" data-wid="' + w.id + '">حذف</button>'
+      + '</div></div>';
+  }).join("");
+  list.querySelectorAll(".wallet-item").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      if (e.target.closest("[data-act]")) return;
+      setActiveWallet(el.getAttribute("data-wid"));
+    });
+  });
+  list.querySelectorAll("[data-act=edit]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute("data-wid");
+      const w = walletStore.wallets.find((x) => x.id === id);
+      if (!w) return;
+      editingWalletId = id;
+      walletStore.activeId = id;
+      saveWallets();
+      const nameEl = document.getElementById("walletName");
+      const addrEl = document.getElementById("walletAddr");
+      if (nameEl) nameEl.value = w.name;
+      if (addrEl) addrEl.value = w.address;
+      renderWalletList();
+    });
+  });
+  list.querySelectorAll("[data-act=del]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute("data-wid");
+      const w = walletStore.wallets.find((x) => x.id === id);
+      ask("حذف ولت", "ولت «" + (w ? w.name : "") + "» حذف شود؟ (سواپ‌هایش در لیست می‌مانند)", () => {
+        removeWallet(id);
+        editingWalletId = null;
+        renderWalletList();
+        render();
+      });
+    });
+  });
+}
+function escapeHtml(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 function render() {
-  const hasWallet = !!(walletAddr && walletAddr.trim());
+  const hasWallet = walletStore.wallets.length > 0;
   const walletHint = document.getElementById("walletHint");
   if (walletHint) walletHint.classList.toggle("hidden", hasWallet);
   const walletDot = document.getElementById("walletDot");
@@ -1112,8 +1335,10 @@ function render() {
     btnWallet.title = hasWallet ? "کیف‌پول متصل · تنظیمات" : "اتصال کیف‌پول";
     btnWallet.setAttribute("aria-label", hasWallet ? "تنظیمات کیف‌پول متصل" : "اتصال کیف‌پول");
   }
-  const s = calcState(trades, live);
+  const s = activeState(live);
+  const wName = activeWalletName();
   const adv = nextAdvice(s, live);
+  renderWalletList();
   const hint = document.getElementById("autoFeeHint");
   if (hint) {
     const feeG = s.totalFeesGram || 0;
@@ -1176,12 +1401,14 @@ function render() {
   }
   const balLine = document.getElementById("walletBalLine");
   if (balLine) {
-    if (walletBal) {
+    const wb = activeWalletBal();
+    const label = wName ? ("«" + wName + "» · ") : "";
+    if (wb) {
       balLine.textContent =
-        "✓ موجودی کیف‌پول: " + fmt(walletBal.ton, 4) + " GRAM · " + fmt(walletBal.usdt, 2) + " USDT · " +
+        "✓ " + label + "موجودی: " + fmt(wb.ton, 4) + " GRAM · " + fmt(wb.usdt, 2) + " USDT · " +
         reconcileNote(s);
     } else {
-      balLine.textContent = reconcileNote(s);
+      balLine.textContent = (label || "") + reconcileNote(s);
     }
   }
 
@@ -1220,8 +1447,9 @@ function render() {
 
   const hist = document.getElementById("history");
   if (hist) {
-  if (!trades.length) hist.innerHTML = '<div class="empty-state"><h3>هنوز سواپی نیست</h3><p>از دکمه «خواندن از کیف‌پول» استفاده کن تا سواپ‌ها از زنجیره بیایند.</p></div>';
-  else hist.innerHTML = trades.slice().reverse().map((t, i, arr) => {
+  const histTrades = tradesForWallet();
+  if (!histTrades.length) hist.innerHTML = '<div class="empty-state"><h3>هنوز سواپی نیست</h3><p>از دکمه «همگام این ولت» استفاده کن تا سواپ‌ها از زنجیره بیایند.</p></div>';
+  else hist.innerHTML = histTrades.slice().reverse().map((t, i, arr) => {
     const feeBits = [];
     if ((t.networkFee || 0) > 0) feeBits.push("شبکه " + fmt(t.networkFee, 6) + " TON");
     if ((t.dexFeeUsdt || 0) > 0) feeBits.push("DEX " + fmt(t.dexFeeUsdt, 4) + " USDT");
@@ -1259,7 +1487,7 @@ function render() {
 }
 
 function runSim(price) {
-  const s = calcState(trades, live);
+  const s = activeState(live);
   if (s.totalGram <= 0) { toast("موجودی GRAM نداری"); return; }
   if (!price || price <= 0) { toast("قیمت معتبر وارد کن"); return; }
   const slip = estSlippagePct(s.totalGram);
@@ -1472,8 +1700,36 @@ document.getElementById("walletSheet").addEventListener("keydown", (e) => {
 });
 document.getElementById("btnSyncWallet").onclick = () => syncWallet(true);
 document.getElementById("btnSyncNow").onclick = () => syncWallet(true);
+const btnSave = document.getElementById("btnWalletSave");
+if (btnSave) btnSave.onclick = () => {
+  const name = (document.getElementById("walletName") || {}).value || "";
+  const addr = (document.getElementById("walletAddr") || {}).value || "";
+  const w = upsertWallet(name, addr, editingWalletId);
+  if (w) {
+    editingWalletId = null;
+    toast("ولت «" + w.name + "» ذخیره شد");
+    renderWalletList();
+    render();
+  }
+};
+const btnSyncAll = document.getElementById("btnSyncAllWallets");
+if (btnSyncAll) btnSyncAll.onclick = async () => {
+  if (!walletStore.wallets.length) { toast("اول ولت اضافه کن"); return; }
+  if (syncing) return;
+  syncing = true;
+  const meta = document.getElementById("walletSyncMeta");
+  try {
+    for (const w of walletStore.wallets) {
+      if (meta) meta.textContent = "همگام همه · «" + w.name + "»…";
+      try { await syncWalletById(w.id, { quiet: true }); } catch (e) { console.warn(w.name, e); }
+    }
+    if (meta) meta.textContent = "همگام همه ولت‌ها انجام شد";
+    toast("همگام‌سازی همه ولت‌ها تمام شد");
+    render();
+  } finally { syncing = false; }
+};
 document.getElementById("walletAddr").onchange = () => {
-  saveWallet(document.getElementById("walletAddr").value);
+  /* address edited — save via btnWalletSave */
   render();
 };
 document.getElementById("walletAddr").onkeydown = (e) => {
@@ -1504,7 +1760,14 @@ document.getElementById("chartDays").onclick = (e) => {
 
 const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
 document.getElementById("tDate").value = now.toISOString().slice(0, 16);
-document.getElementById("walletAddr").value = walletAddr || "";
+{
+  const aw = getActiveWallet();
+  const nameEl = document.getElementById("walletName");
+  const addrEl = document.getElementById("walletAddr");
+  if (nameEl) nameEl.value = aw ? aw.name : "";
+  if (addrEl) addrEl.value = aw ? aw.address : "";
+  renderWalletList();
+}
 bindTg();
 // ---- boot price (automatic, no click) ----
 function loadCachedPrice() {
@@ -1540,10 +1803,10 @@ setTimeout(() => { autoPriceOnce("retry-3s"); }, 3000);
 setTimeout(() => { if (live == null) autoPriceOnce("retry-6s"); }, 6000);
 
 setTimeout(() => { refreshChart(); }, 1000);
-setTimeout(() => { if (walletAddr && walletAddr.trim()) syncWallet(false); }, 2500);
+setTimeout(() => { if (getActiveWallet()) syncWallet(false); }, 2500);
 setInterval(() => { refreshPrice(false); }, 15000);
 // auto re-sync wallet every 10 minutes
-setInterval(() => { if (walletAddr && !syncing) syncWallet(false); }, 10 * 60 * 1000);
+setInterval(() => { if (getActiveWallet() && !syncing) syncWallet(false); }, 10 * 60 * 1000);
 // Periodic status: check every 60s, send if ≥30 min since last report
 // (page must stay open; closing the tab stops this — use ton-alert / bot for offline)
 const PRICE_REPORT_MS = 30 * 60 * 1000;
@@ -1559,7 +1822,7 @@ setInterval(async () => {
   try {
     await refreshPrice(true);
     if (live == null) throw new Error("قیمت در دسترس نیست");
-    const s = calcState(trades, live);
+    const s = activeState(live);
     await sendTelegram(buildStatusMessage(s));
     mem._lastPriceReport = Date.now();
     try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
@@ -1570,4 +1833,4 @@ setInterval(async () => {
     setInterval._reportBusy = false;
   }
 }, 60 * 1000);
-window.addEventListener("resize", () => drawChart(chartPts, calcState(trades, live).avgBuyPrice || null));
+window.addEventListener("resize", () => drawChart(chartPts, activeState(live).avgBuyPrice || null));
