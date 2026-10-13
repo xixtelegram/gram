@@ -50,9 +50,37 @@ import {
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const CHAT = process.env.TELEGRAM_CHAT_ID || "";
+/** Single: WALLET_ADDRESS=EQ...  |  Multi: WALLETS_JSON=[{"name":"اصلی","address":"EQ..."}] */
 const WALLET = process.env.WALLET_ADDRESS || "";
+const WALLETS_JSON = process.env.WALLETS_JSON || "";
 const ALERT_ABOVE = num(process.env.ALERT_ABOVE);
 const ALERT_BELOW = num(process.env.ALERT_BELOW);
+
+function loadWalletList() {
+  const out = [];
+  if (WALLETS_JSON) {
+    try {
+      const arr = JSON.parse(WALLETS_JSON);
+      if (Array.isArray(arr)) {
+        for (const w of arr) {
+          if (w && w.address) {
+            out.push({
+              id: String(w.id || w.address).slice(0, 48),
+              name: String(w.name || "ولت").trim() || "ولت",
+              address: String(w.address).trim(),
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Invalid WALLETS_JSON:", e.message || e);
+    }
+  }
+  if (!out.length && WALLET) {
+    out.push({ id: "default", name: "اصلی", address: WALLET.trim() });
+  }
+  return out;
+}
 const PROFIT_PCTS = listNums(process.env.ALERT_PROFIT_PCTS);
 const LOSS_PCTS = listNums(process.env.ALERT_LOSS_PCTS);
 const STATE_PATH = process.env.STATE_PATH || ".alert-state.json";
@@ -282,56 +310,29 @@ function logEvent(obj) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
-async function main() {
-  if (!TOKEN || !CHAT) {
-    console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
-    process.exit(1);
-  }
-  if (!WALLET) {
-    console.error("Missing WALLET_ADDRESS secret");
-    process.exit(1);
-  }
-
-  const priceInfo = await getPrice();
-  const live = priceInfo.usd;
+async function processOneWallet(wallet, ctx) {
+  const { live, hist, series, cfg, market, mom, mtf, quote, mem, forceReport, duePeriodic, dryRun } = ctx;
+  const [swaps, bal] = await Promise.all([
+    fetchWalletSwaps(wallet.address),
+    fetchWalletBalances(wallet.address).catch(() => null),
+  ]);
   logEvent({
-    event: "price",
-    live,
-    source: priceInfo.source,
-    dex: priceInfo.dexUsd,
-    cex: priceInfo.cexUsd,
-    tonapi: priceInfo.tonapiUsd,
-    diff24h: priceInfo.diff24h,
+    event: "wallet",
+    wallet: wallet.name,
+    address: wallet.address.slice(0, 10) + "…",
+    swaps: swaps.length,
+    ton: bal && bal.ton,
+    usdt: bal && bal.usdt,
   });
 
-  const [swaps, bal, hist] = await Promise.all([
-    fetchWalletSwaps(WALLET),
-    fetchWalletBalances(WALLET).catch(() => null),
-    fetchPriceHistory(),
-  ]);
-  logEvent({ event: "wallet", swaps: swaps.length, ton: bal && bal.ton, usdt: bal && bal.usdt, histPoints: hist.length });
-
   const pos = calcState(swaps, live, bal);
-  const mem = loadState();
-  const series = pushSample(mem, live);
-  // Prefer longer hist for GRAM-specific vol/range; fall back to live series
-  const marketSeries = (hist && hist.length >= 12) ? hist : series;
-  const cfg = withMarketStats(STRATEGY, marketSeries);
-  const market = cfg.market || measureMarketStats(marketSeries);
-
-  const mom = detectMomentum(series, cfg);
-  const mtf = analyzeMultiTimeframe(live, hist, cfg);
   const stance = stanceOf(pos, live);
   const lt = lastTradeFromPos(pos);
-  const quote = {
-    source: priceInfo.source,
-    dexUsd: priceInfo.dexUsd,
-    cexUsd: priceInfo.cexUsd,
-  };
 
   const oppPreview = analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg);
   logEvent({
     event: "analysis",
+    wallet: wallet.name,
     stance: stance.mode + "/" + stance.action,
     phase: mom.phase,
     dir: mom.dir,
@@ -339,17 +340,10 @@ async function main() {
     avg: pos.avgBuyPrice,
     gram: pos.totalGram,
     usdt: pos.cashUsdt,
-    mtfExtremes: (mtf.extremes || []).map((e) => e.kind + ":" + e.periodId),
     tradeAction: oppPreview.action,
     tradeConf: oppPreview.confidence,
-    targetUp: oppPreview.targetUpPct,
-    targetDown: oppPreview.targetDownPct,
     regime: oppPreview.regime,
     atrPct: market && market.atrPct,
-    range7dPct: market && market.range7dPct,
-    posIn7d: market && market.posIn7d,
-    sizeScale: market && market.sizeScale,
-    stopLossPct: cfg.stopLossPct,
   });
 
   const candidates = evaluateAlerts({
@@ -367,35 +361,37 @@ async function main() {
     cfg,
   });
 
+  const prefix = "💳 ولت: " + wallet.name + "\n\n";
   const ready = candidates.filter((a) => {
-    const cool = cooldownFor(a, STRATEGY);
-    // Family-level cooldown: any key in cooldownKeys blocks the alert
+    const cool = cooldownFor(a, cfg);
     for (const k of cooldownKeys(a)) {
-      if (recently(mem, k, cool)) return false;
+      if (recently(mem, wallet.id + ":" + k, cool)) return false;
     }
     return true;
   });
 
-  // Short footer aligned with position — avoids contradictory "ضرر روی کاغذ" under buy alerts
   const st = () => alertStanceFooter(pos, live);
   const msgs = ready.map((a) => ({
     key: a.key,
     family: a.family,
     urgent: !!a.urgent,
-    text: renderAlertMessage(a, st()),
+    text: prefix + renderAlertMessage(a, st()),
     priority: a.priority,
     type: a.type,
+    walletId: wallet.id,
+    cooldownKeys: cooldownKeys(a).map((k) => wallet.id + ":" + k),
   }));
-
-  const forceReport = process.env.REPORT === "1";
-  const reportEveryMs = REPORT_EVERY_HOURS > 0 ? REPORT_EVERY_HOURS * 60 * 60 * 1000 : 0;
-  const lastReportAt = (mem.marks && mem.marks._lastReport) || 0;
-  const duePeriodic = reportEveryMs > 0 && Date.now() - lastReportAt >= reportEveryMs;
 
   if (forceReport || duePeriodic) {
     const status = buildStatusMessage(pos, live, quote, lt, checks(), poolTonReserve);
-    msgs.push({ key: "_lastReport", text: status, photo: true, priority: 99 });
-    console.log(forceReport ? "Forced status report" : `Periodic report due (every ${REPORT_EVERY_HOURS}h)`);
+    msgs.push({
+      key: "_lastReport",
+      text: prefix + status,
+      photo: true,
+      priority: 99,
+      walletId: wallet.id,
+      cooldownKeys: [wallet.id + ":_lastReport"],
+    });
   }
 
   let out = msgs;
@@ -410,19 +406,16 @@ async function main() {
     }
   }
 
-  saveState(mem);
-  if (!out.length) {
-    logEvent({ event: "no_alert", candidates: candidates.length, cooled: candidates.length - ready.length });
-    return;
-  }
-
   const chart = statusChartUrl(series, live);
-  const dryRun = process.env.DRY_RUN === "1";
   let sent = 0;
   for (const m of out) {
-    console.log((dryRun ? "[DRY] " : "") + "Sending:", (m.type || m.key || "") + " | " + m.text.slice(0, 100).replace(/\n/g, " · "));
+    console.log(
+      (dryRun ? "[DRY] " : "") + "[" + wallet.name + "] Sending:",
+      (m.type || m.key || "") + " | " + m.text.slice(0, 100).replace(/\n/g, " · ")
+    );
     const markAll = () => {
-      for (const k of cooldownKeys(m)) mark(mem, k);
+      for (const k of m.cooldownKeys || []) mark(mem, k);
+      if (m.key === "_lastReport") mark(mem, "_lastReport");
     };
     if (dryRun) {
       markAll();
@@ -434,15 +427,80 @@ async function main() {
       else await sendTelegram(m.text);
       markAll();
       sent++;
-      logEvent({ event: "sent", key: m.key, family: m.family, type: m.type, urgent: !!m.urgent });
+      logEvent({ event: "sent", wallet: wallet.name, key: m.key, family: m.family, type: m.type, urgent: !!m.urgent });
     } catch (e) {
       console.error("Send failed:", e.message || e);
-      logEvent({ event: "send_failed", key: m.key, error: String(e.message || e) });
+      logEvent({ event: "send_failed", wallet: wallet.name, key: m.key, error: String(e.message || e) });
     }
   }
+  return { candidates: candidates.length, ready: ready.length, sent };
+}
+
+async function main() {
+  if (!TOKEN || !CHAT) {
+    console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
+    process.exit(1);
+  }
+  const wallets = loadWalletList();
+  if (!wallets.length) {
+    console.error("Missing WALLET_ADDRESS or WALLETS_JSON secret");
+    process.exit(1);
+  }
+
+  const priceInfo = await getPrice();
+  const live = priceInfo.usd;
+  logEvent({
+    event: "price",
+    live,
+    source: priceInfo.source,
+    dex: priceInfo.dexUsd,
+    cex: priceInfo.cexUsd,
+    tonapi: priceInfo.tonapiUsd,
+    diff24h: priceInfo.diff24h,
+    wallets: wallets.map((w) => w.name),
+  });
+
+  const hist = await fetchPriceHistory();
+  const mem = loadState();
+  const series = pushSample(mem, live);
+  const marketSeries = hist && hist.length >= 12 ? hist : series;
+  const cfg = withMarketStats(STRATEGY, marketSeries);
+  const market = cfg.market || measureMarketStats(marketSeries);
+  const mom = detectMomentum(series, cfg);
+  const mtf = analyzeMultiTimeframe(live, hist, cfg);
+  const quote = {
+    source: priceInfo.source,
+    dexUsd: priceInfo.dexUsd,
+    cexUsd: priceInfo.cexUsd,
+  };
+
+  const forceReport = process.env.REPORT === "1";
+  const reportEveryMs = REPORT_EVERY_HOURS > 0 ? REPORT_EVERY_HOURS * 60 * 60 * 1000 : 0;
+  const lastReportAt = (mem.marks && mem.marks._lastReport) || 0;
+  const duePeriodic = reportEveryMs > 0 && Date.now() - lastReportAt >= reportEveryMs;
+  const dryRun = process.env.DRY_RUN === "1";
+
+  let totalSent = 0;
+  for (const wallet of wallets) {
+    try {
+      const r = await processOneWallet(wallet, {
+        live, hist, series, cfg, market, mom, mtf, quote, mem,
+        forceReport, duePeriodic, dryRun,
+      });
+      totalSent += r.sent || 0;
+      if (!r.sent) {
+        logEvent({ event: "no_alert", wallet: wallet.name, candidates: r.candidates, ready: r.ready });
+      }
+    } catch (e) {
+      console.error("Wallet failed:", wallet.name, e.message || e);
+      logEvent({ event: "wallet_failed", wallet: wallet.name, error: String(e.message || e) });
+    }
+  }
+
+  if (forceReport || duePeriodic) mark(mem, "_lastReport");
   saveState(mem);
-  console.log(`${dryRun ? "Dry-run prepared" : "Sent"} ${sent}/${out.length} message(s)`);
-  if (!dryRun && sent === 0) process.exitCode = 1;
+  console.log(`${dryRun ? "Dry-run prepared" : "Sent"} ${totalSent} message(s) across ${wallets.length} wallet(s)`);
+  if (!dryRun && totalSent === 0 && forceReport) process.exitCode = 1;
 }
 
 main().catch((e) => {
