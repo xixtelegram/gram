@@ -36,6 +36,8 @@ import {
   fmt,
   num,
   positionStance,
+  withMarketStats,
+  measureMarketStats,
 } from "./gram-core.mjs";
 import {
   stanceLine as tgStance,
@@ -312,8 +314,13 @@ async function main() {
   const pos = calcState(swaps, live, bal);
   const mem = loadState();
   const series = pushSample(mem, live);
-  const mom = detectMomentum(series, STRATEGY);
-  const mtf = analyzeMultiTimeframe(live, hist, STRATEGY);
+  // Prefer longer hist for GRAM-specific vol/range; fall back to live series
+  const marketSeries = (hist && hist.length >= 12) ? hist : series;
+  const cfg = withMarketStats(STRATEGY, marketSeries);
+  const market = cfg.market || measureMarketStats(marketSeries);
+
+  const mom = detectMomentum(series, cfg);
+  const mtf = analyzeMultiTimeframe(live, hist, cfg);
   const stance = stanceOf(pos, live);
   const lt = lastTradeFromPos(pos);
   const quote = {
@@ -322,7 +329,7 @@ async function main() {
     cexUsd: priceInfo.cexUsd,
   };
 
-  const oppPreview = analyzeTradeOpportunity(live, hist, mom, mtf, pos, STRATEGY);
+  const oppPreview = analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg);
   logEvent({
     event: "analysis",
     stance: stance.mode + "/" + stance.action,
@@ -337,6 +344,12 @@ async function main() {
     tradeConf: oppPreview.confidence,
     targetUp: oppPreview.targetUpPct,
     targetDown: oppPreview.targetDownPct,
+    regime: oppPreview.regime,
+    atrPct: market && market.atrPct,
+    range7dPct: market && market.range7dPct,
+    posIn7d: market && market.posIn7d,
+    sizeScale: market && market.sizeScale,
+    stopLossPct: cfg.stopLossPct,
   });
 
   const candidates = evaluateAlerts({
@@ -351,7 +364,7 @@ async function main() {
     alertAbove: ALERT_ABOVE,
     alertBelow: ALERT_BELOW,
     poolTonReserve,
-    cfg: STRATEGY,
+    cfg,
   });
 
   const ready = candidates.filter((a) => {
