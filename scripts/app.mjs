@@ -1187,18 +1187,16 @@ function maybeAlert(state) {
     try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
   };
 
-  if (mem._lastAny && now - mem._lastAny < ALERT_GLOBAL_GAP_MS) return false;
-
-  // Evaluate every wallet separately (or one synthetic active if none)
+  // All registered wallets — no selection required
   const walletTargets = walletStore.wallets.length
     ? walletStore.wallets.slice()
-    : [{ id: "_none", name: "بدون ولت", address: "" }];
+    : [];
+  if (!walletTargets.length) return false;
 
+  const pending = [];
   for (const w of walletTargets) {
-    const pos = w.id === "_none"
-      ? state
-      : calcState(tradesForWallet(w.id), live, walletBalFor(w.id));
-    const lt = lastTrade(w.id === "_none" ? null : w.id);
+    const pos = calcState(tradesForWallet(w.id), live, walletBalFor(w.id));
+    const lt = lastTrade(w.id);
     const candidates = evaluateAlerts({
       pos,
       live,
@@ -1215,7 +1213,7 @@ function maybeAlert(state) {
     });
     if (!candidates || !candidates.length) continue;
 
-    const prefix = w.id !== "_none" ? ("💳 ولت: " + w.name + "\n\n") : "";
+    const prefix = "💳 ولت: " + w.name + "\n\n";
     const stanceText = alertStanceFooter(pos, live);
 
     for (const alert of candidates) {
@@ -1227,30 +1225,52 @@ function maybeAlert(state) {
 
       const body = renderAlertMessage(alert, stanceText);
       if (!body) continue;
-      const msg = prefix + body;
 
-      maybeAlert._inFlight = true;
-      mem._lastAny = now;
-      try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
-
-      sendTelegram(msg)
-        .then(() => {
-          const allKeys = keys.slice();
-          if (alert.family === "profit") allKeys.push(w.id + ":fam_profit");
-          if (alert.family === "loss") allKeys.push(w.id + ":fam_loss");
-          markKeys(allKeys);
-          toast("هشدار «" + w.name + "» ارسال شد");
-        })
-        .catch(() => {
-          if (mem._lastAny === now) delete mem._lastAny;
-          try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
-          toast("هشدار ارسال نشد");
-        })
-        .finally(() => { maybeAlert._inFlight = false; });
-      return true; // one message per cycle
+      pending.push({
+        w,
+        alert,
+        keys,
+        msg: prefix + body,
+        family: alert.family,
+      });
+      break; // one alert per wallet per cycle
     }
   }
-  return false;
+
+  if (!pending.length) return false;
+
+  // Soft global gap only if we already sent something very recently
+  if (mem._lastAny && now - mem._lastAny < Math.min(ALERT_GLOBAL_GAP_MS, 30 * 1000)) return false;
+
+  maybeAlert._inFlight = true;
+  mem._lastAny = now;
+  try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
+
+  // Send all wallets' alerts (sequentially, all in this cycle)
+  (async () => {
+    let ok = 0;
+    for (const item of pending) {
+      try {
+        await sendTelegram(item.msg);
+        const allKeys = item.keys.slice();
+        if (item.family === "profit") allKeys.push(item.w.id + ":fam_profit");
+        if (item.family === "loss") allKeys.push(item.w.id + ":fam_loss");
+        markKeys(allKeys);
+        ok++;
+      } catch (_) {
+        /* continue other wallets */
+      }
+    }
+    if (ok) toast(ok > 1 ? (ok + " هشدار (چند ولت) ارسال شد") : "هشدار ارسال شد");
+    else {
+      if (mem._lastAny === now) delete mem._lastAny;
+      try { localStorage.setItem(MEMKEY, JSON.stringify(mem)); } catch (_) {}
+      toast("هشدار ارسال نشد");
+    }
+    maybeAlert._inFlight = false;
+  })();
+
+  return true;
 }
 
 function stat(label, value, sub, tone) {
@@ -1269,13 +1289,10 @@ function renderWalletList() {
     return;
   }
   list.innerHTML = walletStore.wallets.map((w) => {
-    const active = w.id === walletStore.activeId;
     const short = w.address.length > 18 ? w.address.slice(0, 8) + "…" + w.address.slice(-6) : w.address;
-    return '<div class="wallet-item' + (active ? ' is-active' : '') + '" data-wid="' + w.id + '" role="listitem">'
+    return '<div class="wallet-item" data-wid="' + w.id + '" role="listitem">'
       + '<div class="wallet-item-body">'
-      + '<div class="wallet-item-name">' + escapeHtml(w.name)
-      + (active ? ' <span class="wallet-active-badge">فعال</span>' : '')
-      + '</div>'
+      + '<div class="wallet-item-name">' + escapeHtml(w.name) + '</div>'
       + '<div class="wallet-item-addr" dir="ltr">' + escapeHtml(short) + '</div>'
       + '</div>'
       + '<div class="wallet-item-actions">'
@@ -1286,7 +1303,15 @@ function renderWalletList() {
   list.querySelectorAll(".wallet-item").forEach((el) => {
     el.addEventListener("click", (e) => {
       if (e.target.closest("[data-act]")) return;
-      setActiveWallet(el.getAttribute("data-wid"));
+      // fill form for edit — all wallets stay active for display/alerts
+      const id = el.getAttribute("data-wid");
+      const w = walletStore.wallets.find((x) => x.id === id);
+      if (!w) return;
+      editingWalletId = id;
+      const nameEl = document.getElementById("walletName");
+      const addrEl = document.getElementById("walletAddr");
+      if (nameEl) nameEl.value = w.name;
+      if (addrEl) addrEl.value = w.address;
     });
   });
   list.querySelectorAll("[data-act=edit]").forEach((btn) => {
@@ -1412,74 +1437,126 @@ function render() {
     }
   }
 
-  const base = s.investedUsdt > 0 ? s.investedUsdt : (Math.abs(s.realizedPnl) + s.investedUsdt);
-  const pnlPct = s.investedUsdt > 0 ? (s.unrealizedPnl / s.investedUsdt) * 100
-    : (s.realizedPnl != null && Math.abs(s.realizedPnl) > 0 ? null : null);
-  const totalPct = (s.realizedPnl + s.unrealizedPnl);
-  document.getElementById("stats1").innerHTML =
-    stat("موجودی GRAM", fmt(s.totalGram, 4), s.fromWallet ? "از کیف‌پول" : "از سواپ‌ها") +
-    stat("موجودی USDT", fmt(s.cashUsdt, 2), s.fromWallet ? "از کیف‌پول" : "برآورد سواپ‌ها") +
-    stat("ارزش کل", live != null ? fmt(s.equity, 2) : "—", "USDT") +
-    stat("سود/زیان کل", (s.totalPnl >= 0 ? "+" : "") + fmt(s.totalPnl, 2),
-      s.investedUsdt > 0 ? (("شناور " + (s.unrealizedPnl >= 0 ? "+" : "") + ((s.unrealizedPnl / s.investedUsdt) * 100).toFixed(2) + "٪") + " · محقق " + (s.realizedPnl >= 0 ? "+" : "") + fmt(s.realizedPnl, 2)) : ("محقق " + (s.realizedPnl >= 0 ? "+" : "") + fmt(s.realizedPnl, 2)),
-      s.totalPnl >= 0 ? "profit" : "loss");
-  document.getElementById("stats2").innerHTML =
-    stat("سود/زیان سواپ آخر", s.lastSwapPnl != null ? ((s.lastSwapPnl >= 0 ? "+" : "") + fmt(s.lastSwapPnl, 2)) : "—", s.lastSwapPct != null ? ((s.lastSwapPct >= 0 ? "+" : "") + s.lastSwapPct.toFixed(2) + "٪") : "", s.lastSwapPnl != null ? (s.lastSwapPnl >= 0 ? "profit" : "loss") : "") +
-    stat("میانگین ورود", s.avgBuyPrice ? fmt(s.avgBuyPrice, 4) : "—", "USDT / GRAM") +
-    stat("هزینه پوزیشن باز", s.investedUsdt ? fmt(s.investedUsdt, 2) : "—", "USDT");
+  // ── Multi-wallet portfolio: show ALL wallets at once ──
+  const panels = walletStore.wallets.length
+    ? walletStore.wallets.map((w) => {
+        const st = calcState(tradesForWallet(w.id), live, walletBalFor(w.id));
+        const short = w.address.length > 16 ? w.address.slice(0, 6) + "…" + w.address.slice(-4) : w.address;
+        return { w, st, short };
+      })
+    : [{ w: { id: "_none", name: "بدون ولت", address: "" }, st: s, short: "" }];
+
+  let stats1Html = '<div class="wallet-panels">';
+  for (const { w, st, short } of panels) {
+    stats1Html += '<div class="wallet-panel">'
+      + '<p class="wallet-panel-title">💳 ' + escapeHtml(w.name)
+      + (short ? ' <span class="addr" dir="ltr">' + escapeHtml(short) + '</span>' : '')
+      + '</p>'
+      + '<div class="stats">'
+      + stat("موجودی GRAM", fmt(st.totalGram, 4), st.fromWallet ? "از زنجیره" : "از سواپ‌ها")
+      + stat("موجودی USDT", fmt(st.cashUsdt, 2), st.fromWallet ? "از زنجیره" : "برآورد سواپ‌ها")
+      + stat("ارزش کل", live != null ? fmt(st.equity, 2) : "—", "USDT")
+      + stat("سود/زیان", (st.totalPnl >= 0 ? "+" : "") + fmt(st.totalPnl, 2),
+          st.investedUsdt > 0
+            ? ("شناور " + (st.unrealizedPnl >= 0 ? "+" : "") + ((st.unrealizedPnl / st.investedUsdt) * 100).toFixed(2) + "٪")
+            : ("محقق " + (st.realizedPnl >= 0 ? "+" : "") + fmt(st.realizedPnl, 2)),
+          st.totalPnl >= 0 ? "profit" : "loss")
+      + '</div></div>';
+  }
+  // Combined totals when 2+ wallets
+  if (panels.length >= 2 && panels[0].w.id !== "_none") {
+    let g = 0, u = 0, eq = 0, pnl = 0;
+    for (const { st } of panels) {
+      g += st.totalGram || 0;
+      u += st.cashUsdt || 0;
+      eq += st.equity || 0;
+      pnl += st.totalPnl || 0;
+    }
+    stats1Html += '<div class="wallet-panel wallet-totals">'
+      + '<p class="wallet-panel-title">جمع همه ولت‌ها</p>'
+      + '<div class="stats">'
+      + stat("GRAM کل", fmt(g, 4), panels.length + " ولت")
+      + stat("USDT کل", fmt(u, 2), "")
+      + stat("ارزش کل", live != null ? fmt(eq, 2) : "—", "USDT")
+      + stat("سود/زیان کل", (pnl >= 0 ? "+" : "") + fmt(pnl, 2), "", pnl >= 0 ? "profit" : "loss")
+      + '</div></div>';
+  }
+  stats1Html += '</div>';
+  document.getElementById("stats1").innerHTML = stats1Html;
+
+  // stats2: per-wallet compact details for first wallets / combined last swap of any
+  let stats2Html = "";
+  for (const { w, st } of panels) {
+    stats2Html +=
+      stat("«" + w.name + "» سواپ آخر", st.lastSwapPnl != null ? ((st.lastSwapPnl >= 0 ? "+" : "") + fmt(st.lastSwapPnl, 2)) : "—",
+        st.lastSwapPct != null ? ((st.lastSwapPct >= 0 ? "+" : "") + st.lastSwapPct.toFixed(2) + "٪") : "",
+        st.lastSwapPnl != null ? (st.lastSwapPnl >= 0 ? "profit" : "loss") : "") +
+      stat("«" + w.name + "» میانگین ورود", st.avgBuyPrice ? fmt(st.avgBuyPrice, 4) : "—", "USDT / GRAM") +
+      stat("«" + w.name + "» هزینه باز", st.investedUsdt ? fmt(st.investedUsdt, 2) : "—", "USDT");
+  }
+  document.getElementById("stats2").innerHTML = stats2Html;
 
   const box = document.getElementById("targets");
   if (box) {
-  if (s.totalGram <= 0 || !s.avgBuyPrice) box.innerHTML = '<p class="empty">بعد از سواپ به GRAM، اهداف اینجا می‌آید</p>';
-  else {
-    const slip = estSlippagePct(s.totalGram) / 100;
-    box.innerHTML = [1, 2, 3, 5, 7, 10, 15, 20].map((pct) => {
-      // mid needed so that AFTER slippage, profit ≈ pct%
-      const neededMid = (s.avgBuyPrice * (1 + pct / 100)) / Math.max(0.5, 1 - slip) / (1 - ROUND / 100);
-      const exec = estExecSellPrice(neededMid, s.totalGram);
-      const usdtOut = s.totalGram * exec;
-      const net = usdtOut - s.investedUsdt;
-      return '<button class="target" type="button" data-p="' + neededMid + '"><span class="profit" style="font-weight:800">+' + pct + '٪</span><span><b style="display:block;font-variant-numeric:tabular-nums">' + fmt(neededMid, 4) + ' mid</b><span class="muted">≈ ' + fmt(usdtOut, 2) + ' بعد از لغزش</span></span><span class="profit" style="font-weight:800">+' + fmt(net, 2) + "</span></button>";
-    }).join("");
-    box.querySelectorAll(".target").forEach((b) => b.onclick = () => runSim(Number(b.dataset.p)));
-  }
+    // targets for any wallet that holds GRAM (prefer largest)
+    const holders = panels.filter((p) => p.st.totalGram > 0 && p.st.avgBuyPrice).sort((a, b) => b.st.totalGram - a.st.totalGram);
+    if (!holders.length) box.innerHTML = '<p class="empty">بعد از سواپ به GRAM در هر ولت، اهداف اینجا می‌آید</p>';
+    else {
+      const st = holders[0].st;
+      const slip = estSlippagePct(st.totalGram) / 100;
+      box.innerHTML = '<p class="muted" style="margin:0 0 8px;font-size:12px">اهداف بر اساس ولت «' + escapeHtml(holders[0].w.name) + '»</p>' + [1, 2, 3, 5, 7, 10, 15, 20].map((pct) => {
+        const neededMid = (st.avgBuyPrice * (1 + pct / 100)) / Math.max(0.5, 1 - slip) / (1 - ROUND / 100);
+        const exec = estExecSellPrice(neededMid, st.totalGram);
+        const usdtOut = st.totalGram * exec;
+        const net = usdtOut - st.investedUsdt;
+        return '<button class="target" type="button" data-p="' + neededMid + '"><span class="profit" style="font-weight:800">+' + pct + '٪</span><span><b style="display:block;font-variant-numeric:tabular-nums">' + fmt(neededMid, 4) + ' mid</b><span class="muted">≈ ' + fmt(usdtOut, 2) + ' بعد از لغزش</span></span><span class="profit" style="font-weight:800">+' + fmt(net, 2) + "</span></button>";
+      }).join("");
+      box.querySelectorAll(".target").forEach((b) => b.onclick = () => runSim(Number(b.dataset.p)));
+    }
   }
 
   const hist = document.getElementById("history");
   if (hist) {
-  const histTrades = tradesForWallet();
-  if (!histTrades.length) hist.innerHTML = '<div class="empty-state"><h3>هنوز سواپی نیست</h3><p>از دکمه «همگام این ولت» استفاده کن تا سواپ‌ها از زنجیره بیایند.</p></div>';
-  else hist.innerHTML = histTrades.slice().reverse().map((t, i, arr) => {
-    const feeBits = [];
-    if ((t.networkFee || 0) > 0) feeBits.push("شبکه " + fmt(t.networkFee, 6) + " TON");
-    if ((t.dexFeeUsdt || 0) > 0) feeBits.push("DEX " + fmt(t.dexFeeUsdt, 4) + " USDT");
-    const feeTxt = feeBits.length ? feeBits.join(" · ") : ((t.exact || t.source === "wallet") ? "مبالغ خالص زنجیره" : "");
-    const isBuy = t.type === "buy";
-    const title = isBuy
-      ? ("خرید " + fmt(t.gram, 4) + " GRAM")
-      : ("فروش " + fmt(t.gram, 4) + " GRAM");
-    const amount = isBuy
-      ? ("پرداخت " + fmt(t.usdt, 2) + " USDT")
-      : ("دریافت " + fmt(t.usdt, 2) + " USDT");
-    const sub = faDate(t.date)
-      + (t.source === "wallet" ? " · کیف‌پول" : " · دستی")
-      + (feeTxt ? " · " + feeTxt : "");
-    return '<div class="hist' + (i < arr.length - 1 ? ' hist-sep' : '') + '" role="listitem">'
-      + '<span class="badge ' + (isBuy ? "up" : "down") + '" aria-label="' + (isBuy ? "خرید" : "فروش") + '">' + (isBuy ? "خرید" : "فروش") + '</span>'
-      + '<div class="hist-body">'
-      + '<p class="hist-title">' + title + '</p>'
-      + '<p class="hist-amount">' + amount + '</p>'
-      + '<p class="hist-sub">' + sub + '</p>'
-      + '</div>'
-      + '<div class="hist-meta">'
-      + '<p class="hist-price">' + fmt(t.price, 4) + '</p>'
-      + '<p class="hist-price-label">قیمت اجرا</p>'
-      + '<button class="btn btn-danger btn-xs" data-id="' + t.id + '" type="button" aria-label="حذف این سواپ">حذف</button>'
-      + '</div></div>';
-  }).join("");
-  hist.querySelectorAll("[data-id]").forEach((b) => b.onclick = () => ask("حذف معامله", "این معامله حذف شود؟", () => {
-    trades = trades.filter((x) => x.id !== Number(b.dataset.id)); saveTrades(); render();
-  }));
+    // All wallets' trades, labeled
+    const nameById = {};
+    for (const w of walletStore.wallets) nameById[w.id] = w.name;
+    const histTrades = trades.slice().sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id);
+    if (!histTrades.length) {
+      hist.innerHTML = '<div class="empty-state"><h3>هنوز سواپی نیست</h3><p>ولت‌ها را همگام کن تا سواپ‌ها از زنجیره بیایند.</p></div>';
+    } else {
+      hist.innerHTML = histTrades.map((t, i, arr) => {
+        const feeBits = [];
+        if ((t.networkFee || 0) > 0) feeBits.push("شبکه " + fmt(t.networkFee, 6) + " TON");
+        if ((t.dexFeeUsdt || 0) > 0) feeBits.push("DEX " + fmt(t.dexFeeUsdt, 4) + " USDT");
+        const feeTxt = feeBits.length ? feeBits.join(" · ") : ((t.exact || t.source === "wallet") ? "مبالغ خالص زنجیره" : "");
+        const isBuy = t.type === "buy";
+        const wlabel = t.walletId && nameById[t.walletId] ? nameById[t.walletId] : (t.walletId ? "ولت" : "—");
+        const title = isBuy
+          ? ("خرید " + fmt(t.gram, 4) + " GRAM")
+          : ("فروش " + fmt(t.gram, 4) + " GRAM");
+        const amount = isBuy
+          ? ("پرداخت " + fmt(t.usdt, 2) + " USDT")
+          : ("دریافت " + fmt(t.usdt, 2) + " USDT");
+        const sub = "💳 " + wlabel + " · " + faDate(t.date)
+          + (t.source === "wallet" ? " · کیف‌پول" : " · دستی")
+          + (feeTxt ? " · " + feeTxt : "");
+        return '<div class="hist' + (i < arr.length - 1 ? ' hist-sep' : '') + '" role="listitem">'
+          + '<span class="badge ' + (isBuy ? "up" : "down") + '" aria-label="' + (isBuy ? "خرید" : "فروش") + '">' + (isBuy ? "خرید" : "فروش") + '</span>'
+          + '<div class="hist-body">'
+          + '<p class="hist-title">' + title + '</p>'
+          + '<p class="hist-amount">' + amount + '</p>'
+          + '<p class="hist-sub">' + sub + '</p>'
+          + '</div>'
+          + '<div class="hist-meta">'
+          + '<p class="hist-price">' + fmt(t.price, 4) + '</p>'
+          + '<p class="hist-price-label">قیمت اجرا</p>'
+          + '<button class="btn btn-danger btn-xs" data-id="' + t.id + '" type="button" aria-label="حذف این سواپ">حذف</button>'
+          + '</div></div>';
+      }).join("");
+      hist.querySelectorAll("[data-id]").forEach((b) => b.onclick = () => ask("حذف معامله", "این معامله حذف شود؟", () => {
+        trades = trades.filter((x) => x.id !== Number(b.dataset.id)); saveTrades(); render();
+      }));
+    }
   }
 
   try { drawChart(chartPts, s.avgBuyPrice || null); } catch (e) { console.error(e); }
@@ -1803,10 +1880,28 @@ setTimeout(() => { autoPriceOnce("retry-3s"); }, 3000);
 setTimeout(() => { if (live == null) autoPriceOnce("retry-6s"); }, 6000);
 
 setTimeout(() => { refreshChart(); }, 1000);
-setTimeout(() => { if (getActiveWallet()) syncWallet(false); }, 2500);
+setTimeout(async () => {
+  if (!walletStore.wallets.length || syncing) return;
+  syncing = true;
+  try {
+    for (const w of walletStore.wallets) {
+      try { await syncWalletById(w.id, { quiet: true }); } catch (_) {}
+    }
+    render();
+  } finally { syncing = false; }
+}, 2500);
 setInterval(() => { refreshPrice(false); }, 15000);
 // auto re-sync wallet every 10 minutes
-setInterval(() => { if (getActiveWallet() && !syncing) syncWallet(false); }, 10 * 60 * 1000);
+setInterval(async () => {
+  if (!walletStore.wallets.length || syncing) return;
+  syncing = true;
+  try {
+    for (const w of walletStore.wallets) {
+      try { await syncWalletById(w.id, { quiet: true }); } catch (_) {}
+    }
+    render();
+  } finally { syncing = false; }
+}, 10 * 60 * 1000);
 // Periodic status: check every 60s, send if ≥30 min since last report
 // (page must stay open; closing the tab stops this — use ton-alert / bot for offline)
 const PRICE_REPORT_MS = 30 * 60 * 1000;
