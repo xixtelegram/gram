@@ -254,16 +254,37 @@ function projectionBlock(opp) {
   if (!opp) return "";
   let t = "";
   if (opp.targetUpPct != null || opp.targetDownPct != null) {
-    t += "\n\n📐 تخمین حرکت بعدی";
+    t += "\n\n📐 فاصله تا سقف/کف بازه";
     if (opp.horizon) t += " (افق: " + opp.horizon + ")";
-    t += ":";
+    t += " — نه پیش‌بینی قطعی:";
     if (opp.targetUpPct != null) {
-      t += "\n• رشد ممکن: حدود +" + pctStr(opp.targetUpPct, 1);
+      t += "\n• تا سقف بازه: حدود +" + pctStr(opp.targetUpPct, 1);
       if (opp.targetUpPrice != null) t += " → نزدیک " + fmt(opp.targetUpPrice, 4);
     }
     if (opp.targetDownPct != null) {
-      t += "\n• ریزش ممکن: حدود −" + pctStr(opp.targetDownPct, 1);
+      t += "\n• تا کف بازه: حدود −" + pctStr(opp.targetDownPct, 1);
       if (opp.targetDownPrice != null) t += " → نزدیک " + fmt(opp.targetDownPrice, 4);
+    }
+  }
+  if (opp.regime) {
+    const regFa = { uptrend: "روند صعودی", downtrend: "روند نزولی", range: "بازه رنج" };
+    t += "\n• رژیم بازار: " + (regFa[opp.regime] || opp.regime);
+  }
+  // GRAM-specific live market context (from measureMarketStats)
+  if (opp.market) {
+    const m = opp.market;
+    t += "\n\n📊 وضعیت خودِ GRAM:";
+    if (m.atrPct != null) t += "\n• نوسان قدم: ≈ " + Number(m.atrPct).toFixed(2) + "٪";
+    if (m.range7dPct != null) t += "\n• رنج ۷روز: ≈ " + Number(m.range7dPct).toFixed(1) + "٪";
+    if (m.posIn7d != null) {
+      const posPct = Math.round(m.posIn7d * 100);
+      t += "\n• موقعیت در رنج ۷روز: " + posPct + "٪ از کف به سقف";
+    }
+    if (m.sizeScale != null && m.sizeScale < 0.95) {
+      t += "\n• پیشنهاد سایز: حدود " + Math.round(m.sizeScale * 100) + "٪ معمول (نوسان بالاست)";
+    }
+    if (m.stopLossPct != null) {
+      t += "\n• حدضرر پیشنهادی (بر اساس نوسان): ≈ " + Number(m.stopLossPct).toFixed(1) + "٪";
     }
   }
   if (opp.confidence != null) {
@@ -278,10 +299,19 @@ function reasonFa(key) {
     pos_gram: "بیشتر سرمایه‌ات GRAM است",
     rev_up: "برگشت صعودی بعد از ریزش",
     rev_down: "برگشت نزولی بعد از رشد",
+    rev_confirmed: "برگشت با تأیید چند پنجره",
+    rev_vs_downtrend: "برگشت در برابر روند نزولی بالاتر",
+    rev_vs_uptrend: "برگشت در برابر روند صعودی بالاتر",
     rally: "روند رشد فعال",
     dump: "روند ریزش فعال",
+    dump_penalty: "جریمه خرید وسط ریزش",
     asymm_up: "جا برای رشد بیشتر از ریزش",
     asymm_down: "جا برای ریزش بیشتر از رشد",
+    near_low_confluence: "هم‌پوشانی کف چند بازه کوتاه",
+    near_high_confluence: "هم‌پوشانی سقف چند بازه کوتاه",
+    regime_down: "رژیم روند نزولی",
+    regime_up: "رژیم روند صعودی",
+    regime_range: "رژیم رنج",
   };
   if (map[key]) return map[key];
   if (key.startsWith("near_low_")) return "نزدیک کف بازهٔ " + key.replace("near_low_", "");
@@ -293,13 +323,15 @@ function reasonFa(key) {
 
 function reasonsLine(opp) {
   if (!opp || !opp.reasons || !opp.reasons.length) return "";
+  const skip = new Set(["dump_penalty"]); // internal scoring, not user-facing
   const uniq = [];
   for (const r of opp.reasons) {
+    if (skip.has(r)) continue;
     const fa = reasonFa(r);
     if (fa && !uniq.includes(fa)) uniq.push(fa);
   }
   if (!uniq.length) return "";
-  return "\n\nدلیل: " + uniq.slice(0, 4).join(" · ");
+  return "\n\nدلیل: " + uniq.slice(0, 6).join(" · ");
 }
 
 export function stanceLine(s, price, lastTrade, checks) {
