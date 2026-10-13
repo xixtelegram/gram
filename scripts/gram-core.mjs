@@ -40,10 +40,10 @@ export const DEFAULT_STRATEGY = Object.freeze({
   shortWindow: 16,
   prevWindow: 16,
   medWindow: 48,
-  /** Reversal needs at least this move vs noise */
-  reversalNoiseMult: 1.0,
+  /** Reversal needs at least this move vs noise (stricter = fewer false flips) */
+  reversalNoiseMult: 1.35,
   /** Rally/dump strength floor (% move) */
-  phaseStrengthPct: 0.6,
+  phaseStrengthPct: 0.85,
   /** Stop-loss alert when underwater vs avg entry (%) */
   stopLossPct: 3.0,
   /** Max alerts of same family per day (soft limit) */
@@ -52,36 +52,45 @@ export const DEFAULT_STRATEGY = Object.freeze({
   sizeFractions: [0.25, 0.5, 1.0],
   /** Multi-TF range analysis (includes 3d for short swing) */
   rangePeriods: Object.freeze([
-    { id: "24h",  seconds: 86400,      label: "۲۴ ساعت", priority: 2, extremePctOfRange: 0.85, moveVsRange: 0.35 },
-    { id: "3d",   seconds: 259200,     label: "۳ روز",   priority: 2, extremePctOfRange: 0.86, moveVsRange: 0.32 },
-    { id: "7d",   seconds: 604800,     label: "۷ روز",   priority: 2, extremePctOfRange: 0.88, moveVsRange: 0.30 },
-    { id: "30d",  seconds: 2592000,    label: "۳۰ روز",  priority: 2, extremePctOfRange: 0.90, moveVsRange: 0.25 },
-    { id: "90d",  seconds: 7776000,    label: "۳ ماه",   priority: 1, extremePctOfRange: 0.92, moveVsRange: 0.22 },
-    { id: "180d", seconds: 15552000,   label: "۶ ماه",   priority: 1, extremePctOfRange: 0.93, moveVsRange: 0.20 },
+    { id: "24h",  seconds: 86400,      label: "۲۴ ساعت", priority: 2, extremePctOfRange: 0.88, moveVsRange: 0.38 },
+    { id: "3d",   seconds: 259200,     label: "۳ روز",   priority: 2, extremePctOfRange: 0.88, moveVsRange: 0.34 },
+    { id: "7d",   seconds: 604800,     label: "۷ روز",   priority: 2, extremePctOfRange: 0.90, moveVsRange: 0.30 },
+    { id: "30d",  seconds: 2592000,    label: "۳۰ روز",  priority: 2, extremePctOfRange: 0.91, moveVsRange: 0.26 },
+    { id: "90d",  seconds: 7776000,    label: "۳ ماه",   priority: 1, extremePctOfRange: 0.93, moveVsRange: 0.22 },
+    { id: "180d", seconds: 15552000,   label: "۶ ماه",   priority: 1, extremePctOfRange: 0.94, moveVsRange: 0.20 },
     { id: "365d", seconds: 31536000,   label: "۱ سال",   priority: 1, extremePctOfRange: 0.95, moveVsRange: 0.18 },
   ]),
-  /** Explicit trade-signal thresholds */
+  /**
+   * Explicit trade-signal thresholds — higher bar = fewer but cleaner signals.
+   * Principle: mean-reversion alone is not enough; need confluence or confirmed reversal.
+   */
   trade: Object.freeze({
     /** Min confidence (0–100) to emit BUY/SELL command */
-    minConfidence: 55,
+    minConfidence: 68,
     /** Prefer short TF for target sizing */
     shortIds: Object.freeze(["24h", "3d", "7d"]),
     mediumIds: Object.freeze(["30d", "90d"]),
+    /** Higher-TF ids used for regime (trend vs range) */
+    regimeIds: Object.freeze(["7d", "30d", "90d"]),
+    /** Strong downtrend: posInRange low + medDir down → buy needs reversal */
+    strongTrendPos: 0.28,
+    /** Min short-TF near-extreme confluence to trust pure mean-reversion */
+    minNearConfluence: 2,
   }),
   /** Cooldowns (ms) — consumers may still apply their own */
   cool: Object.freeze({
-    reversal: 8 * 60 * 1000,
-    phase: 18 * 60 * 1000,
-    rangeHigh: 45 * 60 * 1000,
-    rangeLow: 45 * 60 * 1000,
-    rangeMove: 30 * 60 * 1000,
+    reversal: 10 * 60 * 1000,
+    phase: 20 * 60 * 1000,
+    rangeHigh: 50 * 60 * 1000,
+    rangeLow: 50 * 60 * 1000,
+    rangeMove: 35 * 60 * 1000,
     stop: 60 * 60 * 1000,
-    level: 20 * 60 * 1000,
+    level: 25 * 60 * 1000,
     /** Same profit/loss event must not re-fire for hours (prevents 1.5→2→2.5 spam) */
     profit: 3 * 60 * 60 * 1000,
     loss: 3 * 60 * 60 * 1000,
     /** Explicit BUY/SELL command */
-    tradeSignal: 25 * 60 * 1000,
+    tradeSignal: 35 * 60 * 1000,
   }),
 });
 
@@ -108,9 +117,122 @@ export function fmt(n, d = 4) {
 export function noiseAbs(price, cfg = DEFAULT_STRATEGY) {
   const p = Number(price);
   const px = Number.isFinite(p) && p > 0 ? p : 1;
-  const pct = cfg.noisePct != null ? cfg.noisePct : NOISE_PCT;
+  // Prefer market-adaptive noise when measureMarketStats was merged into cfg
+  const pct =
+    cfg.adaptiveNoisePct != null
+      ? cfg.adaptiveNoisePct
+      : cfg.noisePct != null
+        ? cfg.noisePct
+        : NOISE_PCT;
   const floor = cfg.noiseFloor != null ? cfg.noiseFloor : NOISE_FLOOR;
   return Math.max(floor, px * pct);
+}
+
+/**
+ * Measure GRAM/TON-specific market stats from a live price series.
+ * All thresholds that used fixed % can be scaled from these.
+ *
+ * @param {Array<{t:number,p:number}>} series sorted ascending
+ * @returns {{
+ *   atrPct: number,          // mean abs step % (like simple ATR%)
+ *   realizedVolPct: number,  // stdev of returns %
+ *   range24hPct: number|null,
+ *   range7dPct: number|null,
+ *   posIn7d: number|null,    // 0=at low, 1=at high
+ *   noisePct: number,        // recommended noise band as fraction
+ *   stopAtrMult: number,     // suggested stop distance in ATR multiples
+ *   sizeScale: number,       // 0.25–1.0 shrink size when vol is high
+ *   samples: number,
+ * }}
+ */
+export function measureMarketStats(series) {
+  const empty = {
+    atrPct: 0.5,
+    realizedVolPct: 0.8,
+    range24hPct: null,
+    range7dPct: null,
+    posIn7d: null,
+    noisePct: NOISE_PCT,
+    stopAtrMult: 2.5,
+    sizeScale: 1,
+    samples: 0,
+  };
+  if (!series || series.length < 8) return empty;
+
+  const prices = series.map((x) => x.p).filter((p) => p > 0);
+  if (prices.length < 8) return empty;
+
+  const rets = [];
+  for (let i = 1; i < prices.length; i++) {
+    rets.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+  }
+  const atr = rets.reduce((a, r) => a + Math.abs(r), 0) / rets.length;
+  const mean = rets.reduce((a, r) => a + r, 0) / rets.length;
+  const variance = rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length;
+  const vol = Math.sqrt(variance);
+
+  const atrPct = atr * 100;
+  const realizedVolPct = vol * 100;
+
+  // Noise band ≈ 1.5× mean step, clamped for GRAM typical ranges
+  const noisePct = Math.min(0.025, Math.max(0.008, atr * 1.6));
+
+  const now = series[series.length - 1].t;
+  const lastP = prices[prices.length - 1];
+
+  function rangeOf(ms) {
+    const sl = series.filter((x) => x.t >= now - ms);
+    if (sl.length < 3) return null;
+    let hi = -Infinity, lo = Infinity;
+    for (const x of sl) {
+      if (x.p > hi) hi = x.p;
+      if (x.p < lo) lo = x.p;
+    }
+    const mid = (hi + lo) / 2;
+    if (!(mid > 0) || hi <= lo) return null;
+    return {
+      pct: ((hi - lo) / mid) * 100,
+      pos: (lastP - lo) / (hi - lo),
+      hi,
+      lo,
+    };
+  }
+
+  const r24 = rangeOf(86400000);
+  const r7 = rangeOf(7 * 86400000);
+
+  // Size scale: when ATR is elevated vs calm (~0.35–0.5% step), shrink position
+  // calm atrPct ~0.4 → scale 1; hot atrPct ~1.2 → scale ~0.4
+  const sizeScale = Math.max(0.25, Math.min(1, 0.55 / Math.max(0.35, atrPct)));
+
+  return {
+    atrPct: +atrPct.toFixed(3),
+    realizedVolPct: +realizedVolPct.toFixed(3),
+    range24hPct: r24 ? +r24.pct.toFixed(2) : null,
+    range7dPct: r7 ? +r7.pct.toFixed(2) : null,
+    posIn7d: r7 ? +r7.pos.toFixed(3) : null,
+    noisePct,
+    stopAtrMult: 2.5,
+    sizeScale: +sizeScale.toFixed(3),
+    samples: prices.length,
+    lastPrice: lastP,
+  };
+}
+
+/**
+ * Merge measured market stats into strategy config (adaptive thresholds).
+ * Call once per analysis cycle with the live series.
+ */
+export function withMarketStats(cfg, series) {
+  const base = cfg || DEFAULT_STRATEGY;
+  const m = measureMarketStats(series);
+  return {
+    ...base,
+    adaptiveNoisePct: m.noisePct,
+    market: m,
+    // Adaptive stop: ~2.5 ATR in %, floor 1.5%, cap 6%
+    stopLossPct: Math.min(6, Math.max(1.5, m.atrPct * (m.stopAtrMult || 2.5))),
+  };
 }
 
 /** @param {number} poolTonReserve */
@@ -387,15 +509,44 @@ export function buyIsWorthwhile(s, price, poolTonReserve = 1.7e6, cfg = DEFAULT_
  * Suggested trade size fractions of available side (GRAM for sell, USDT for buy).
  * Filters out sizes that wouldn't clear minAction after slippage for sells.
  */
+/**
+ * Suggested trade sizes scaled by GRAM volatility.
+ * When market.atrPct is high, fractions shrink so risk stays similar in $ terms.
+ * Also returns a recommended primary size based on sizeScale.
+ */
 export function suggestedSizes(s, price, action, poolTonReserve = 1.7e6, cfg = DEFAULT_STRATEGY) {
-  const fracs = cfg.sizeFractions || [0.25, 0.5, 1];
+  const baseFracs = cfg.sizeFractions || [0.25, 0.5, 1];
+  const scale = (cfg.market && cfg.market.sizeScale != null)
+    ? cfg.market.sizeScale
+    : 1;
+  // Scaled fractions, never above 1, keep at least a small probe size
+  const fracs = baseFracs
+    .map((f) => Math.min(1, Math.max(0.1, f * scale)))
+    .filter((f, i, arr) => arr.indexOf(f) === i)
+    .sort((a, b) => a - b);
+
   if (!s || !price || !action) return [];
+
+  const atrPct = (cfg.market && cfg.market.atrPct) || null;
+  const note = atrPct != null
+    ? `نوسان فعلی GRAM ≈ ${atrPct.toFixed(2)}٪/قدم → مقیاس سایز ${scale.toFixed(2)}`
+    : null;
+
   if (action === "sell" && s.totalGram > 0) {
     return fracs.map((f) => {
       const gram = s.totalGram * f;
       const exec = estExecSellPrice(price, gram, poolTonReserve);
       const pct = s.avgBuyPrice > 0 ? ((exec - s.avgBuyPrice) / s.avgBuyPrice) * 100 : null;
-      return { fraction: f, gram, usdtEst: gram * exec, edgePct: pct, slipPct: estSlippagePct(gram, poolTonReserve) };
+      return {
+        fraction: f,
+        gram,
+        usdtEst: gram * exec,
+        edgePct: pct,
+        slipPct: estSlippagePct(gram, poolTonReserve),
+        volScale: scale,
+        atrPct,
+        note,
+      };
     });
   }
   if (action === "buy" && s.cashUsdt > 0) {
@@ -403,7 +554,15 @@ export function suggestedSizes(s, price, action, poolTonReserve = 1.7e6, cfg = D
       const usdt = s.cashUsdt * f;
       const exec = estExecBuyPrice(price, usdt, poolTonReserve);
       const gramEst = exec > 0 ? usdt / exec : 0;
-      return { fraction: f, usdt, gramEst, slipPct: estSlippagePct(gramEst, poolTonReserve) };
+      return {
+        fraction: f,
+        usdt,
+        gramEst,
+        slipPct: estSlippagePct(gramEst, poolTonReserve),
+        volScale: scale,
+        atrPct,
+        note,
+      };
     });
   }
   return [];
@@ -443,6 +602,7 @@ export function detectMomentum(series, cfg = DEFAULT_STRATEGY) {
     strength: 0,
     movePct: 0,
     volatility: 0,
+    confirmed: false,
   };
   if (!series || series.length < 6) return empty;
 
@@ -454,14 +614,14 @@ export function detectMomentum(series, cfg = DEFAULT_STRATEGY) {
 
   function win(arr) {
     if (!arr || arr.length < 2) {
-      return { dir: "flat", delta: 0, from: null, to: null, movePct: 0, vol: 0 };
+      return { dir: "flat", delta: 0, from: null, to: null, movePct: 0, vol: 0, up: 0, down: 0 };
     }
     const from = arr[0].p;
     const to = arr[arr.length - 1].p;
     const delta = to - from;
     let up = 0, down = 0;
     let sumAbs = 0;
-    const step = nAbs * 0.45;
+    const step = nAbs * 0.5;
     for (let i = 1; i < arr.length; i++) {
       const d = arr[i].p - arr[i - 1].p;
       sumAbs += Math.abs(d);
@@ -469,39 +629,61 @@ export function detectMomentum(series, cfg = DEFAULT_STRATEGY) {
       else if (d <= -step) down++;
     }
     let dir = "flat";
+    // Direction needs both net delta and majority of steps agreeing
     if (Math.abs(delta) >= nAbs) {
       if (delta > 0 && up >= down) dir = "up";
       else if (delta < 0 && down >= up) dir = "down";
     }
     const movePct = from > 0 ? (delta / from) * 100 : 0;
     const vol = arr.length > 1 ? sumAbs / (arr.length - 1) : 0;
-    return { dir, delta, from, to, movePct, vol };
+    return { dir, delta, from, to, movePct, vol, up, down };
   }
 
   const short = win(series.slice(-shortN));
-  const prev = prevN >= 4 ? win(series.slice(-(shortN + prevN), -shortN || undefined)) : { dir: "flat", delta: 0, movePct: 0, vol: 0 };
+  const prev = prevN >= 4 ? win(series.slice(-(shortN + prevN), -shortN || undefined)) : { dir: "flat", delta: 0, movePct: 0, vol: 0, up: 0, down: 0 };
   const med = win(series.slice(-medN));
 
   let phase = "flat";
   let dir = short.dir;
-  const revMult = cfg.reversalNoiseMult != null ? cfg.reversalNoiseMult : 1;
-  const strengthFloor = cfg.phaseStrengthPct != null ? cfg.phaseStrengthPct : 0.6;
+  let confirmed = false;
+  const revMult = cfg.reversalNoiseMult != null ? cfg.reversalNoiseMult : 1.35;
+  const strengthFloor = cfg.phaseStrengthPct != null ? cfg.phaseStrengthPct : 0.85;
 
-  if (short.dir === "down" && Math.abs(short.delta) >= nAbs * revMult && (prev.dir === "up" || med.dir === "up")) {
+  // Reversal: short must clearly flip against prev AND preferably against med,
+  // with move size above noise * mult (stricter to avoid noise flips).
+  const shortStrong = Math.abs(short.delta) >= nAbs * revMult;
+  const shortStepsOkUp = short.up >= short.down + 1;
+  const shortStepsOkDown = short.down >= short.up + 1;
+
+  if (
+    short.dir === "down" &&
+    shortStrong &&
+    shortStepsOkDown &&
+    (prev.dir === "up" || med.dir === "up")
+  ) {
     phase = "reversal_down";
     dir = "down";
-  } else if (short.dir === "up" && Math.abs(short.delta) >= nAbs * revMult && (prev.dir === "down" || med.dir === "down")) {
+    confirmed = prev.dir === "up" && med.dir === "up";
+  } else if (
+    short.dir === "up" &&
+    shortStrong &&
+    shortStepsOkUp &&
+    (prev.dir === "down" || med.dir === "down")
+  ) {
     phase = "reversal_up";
     dir = "up";
+    confirmed = prev.dir === "down" && med.dir === "down";
   } else if (short.dir === "up" && (med.dir === "up" || prev.dir === "up" || med.dir === "flat")) {
-    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.4 || Math.abs(short.movePct) >= strengthFloor) {
+    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.5 || Math.abs(short.movePct) >= strengthFloor) {
       phase = "rally";
       dir = "up";
+      confirmed = med.dir === "up" && short.dir === "up";
     }
   } else if (short.dir === "down" && (med.dir === "down" || prev.dir === "down" || med.dir === "flat")) {
-    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.4 || Math.abs(short.movePct) >= strengthFloor) {
+    if (Math.abs(short.delta) >= nAbs || Math.abs(med.delta) >= nAbs * 1.5 || Math.abs(short.movePct) >= strengthFloor) {
       phase = "dump";
       dir = "down";
+      confirmed = med.dir === "down" && short.dir === "down";
     }
   } else if (short.dir === "flat" && med.dir === "up") {
     phase = "rally";
@@ -523,6 +705,7 @@ export function detectMomentum(series, cfg = DEFAULT_STRATEGY) {
     strength: Math.abs(short.movePct || 0),
     movePct: short.movePct || 0,
     volatility: short.vol || 0,
+    confirmed,
   };
 }
 
@@ -701,14 +884,23 @@ export function analyzeMultiTimeframe(live, hist, cfg = DEFAULT_STRATEGY) {
 /**
  * Build a clear trading decision from multi-TF ranges + momentum + position.
  *
+ * Principles applied:
+ *  1. Regime first — strong higher-TF trend reduces pure mean-reversion weight.
+ *  2. Reversal confirmed > near extreme alone.
+ *  3. Buying into active dump without reversal is penalized (no catching knives).
+ *  4. Position bias is small; it only tilts, does not create the signal.
+ *  5. High confidence requires confluence (reversal + extreme, or multi-TF extreme + asymmetry).
+ *  6. Distance to period high/low is context (room), not a forecast of the next move.
+ *
  * Returns:
  *   action: "BUY" | "SELL" | "HOLD"
  *   confidence: 0–100
- *   targetUpPct / targetDownPct: estimated next move sizes (%)
+ *   targetUpPct / targetDownPct: room to period high/low (%)
  *   targetUpPrice / targetDownPrice
  *   horizon: main period label used for sizing
  *   reasons: string[] (English keys for messaging layer)
  *   periods: compact stats used
+ *   regime: "uptrend" | "downtrend" | "range"
  */
 export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT_STRATEGY) {
   const empty = {
@@ -723,6 +915,7 @@ export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT
     periods: [],
     scoreBuy: 0,
     scoreSell: 0,
+    regime: "range",
   };
   if (!live || !(live > 0)) return empty;
 
@@ -733,8 +926,11 @@ export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT
   const tradeCfg = cfg.trade || DEFAULT_STRATEGY.trade || {};
   const shortIds = new Set(tradeCfg.shortIds || ["24h", "3d", "7d"]);
   const mediumIds = new Set(tradeCfg.mediumIds || ["30d", "90d"]);
+  const regimeIds = new Set(tradeCfg.regimeIds || ["7d", "30d", "90d"]);
+  const strongTrendPos = tradeCfg.strongTrendPos != null ? tradeCfg.strongTrendPos : 0.28;
+  const minNearConfluence = tradeCfg.minNearConfluence != null ? tradeCfg.minNearConfluence : 2;
 
-  // Per-period projection: room to high / room to low
+  // Per-period: room to high / room to low (context, not forecast)
   const stats = okPeriods.map((p) => {
     const upPct = p.high > live ? ((p.high - live) / live) * 100 : 0;
     const downPct = live > p.low ? ((live - p.low) / live) * 100 : 0;
@@ -753,7 +949,7 @@ export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT
     };
   });
 
-  // Weighted average upside / downside (short TF heavier)
+  // Weighted average room (short TF heavier) — for display / asymmetry only
   let wUp = 0, wDown = 0, wSum = 0;
   for (const s of stats) {
     let w = s.priority >= 2 ? 2.5 : 1;
@@ -768,94 +964,189 @@ export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT
   const targetUpPrice = targetUpPct != null ? live * (1 + targetUpPct / 100) : null;
   const targetDownPrice = targetDownPct != null ? live * (1 - targetDownPct / 100) : null;
 
-  // Primary horizon = shortest TF with meaningful range
   const horizonRow =
     stats.find((s) => shortIds.has(s.id) && s.rangePct >= 0.8) ||
     stats.find((s) => shortIds.has(s.id)) ||
     stats[0] ||
     null;
 
+  // ── Regime (higher-TF) ──
+  // downtrend: price in lower part of 7d/30d/90d ranges + med momentum down
+  // uptrend: opposite
+  // range: otherwise
+  let regimeVotesDown = 0, regimeVotesUp = 0, regimeN = 0;
+  for (const s of stats) {
+    if (!regimeIds.has(s.id)) continue;
+    regimeN++;
+    if (s.posInRange <= strongTrendPos) regimeVotesDown++;
+    else if (s.posInRange >= 1 - strongTrendPos) regimeVotesUp++;
+  }
+  const medDir = (mom && mom.medDir) || "flat";
+  let regime = "range";
+  if (regimeN > 0) {
+    if (regimeVotesDown >= Math.ceil(regimeN * 0.6) && medDir !== "up") regime = "downtrend";
+    else if (regimeVotesUp >= Math.ceil(regimeN * 0.6) && medDir !== "down") regime = "uptrend";
+    else if (medDir === "down" && regimeVotesDown >= 1) regime = "downtrend";
+    else if (medDir === "up" && regimeVotesUp >= 1) regime = "uptrend";
+  } else if (medDir === "down") {
+    regime = "downtrend";
+  } else if (medDir === "up") {
+    regime = "uptrend";
+  }
+
   // ── scoring ──
   let scoreBuy = 0;
   let scoreSell = 0;
   const reasons = [];
-
-  // Position bias
   const stance = positionStance(pos, live);
+
+  // Position bias — small tilt only (does not create the signal)
   if (stance.action === "buy") {
-    scoreBuy += 12;
+    scoreBuy += 6;
     reasons.push("pos_usdt");
   } else if (stance.action === "sell") {
-    scoreSell += 12;
+    scoreSell += 6;
     reasons.push("pos_gram");
   }
 
-  // Momentum phase
+  // Momentum phase — reversal is the highest-quality trigger
   const phase = (mom && mom.phase) || "flat";
   const strength = Math.abs((mom && mom.movePct) || 0);
+  const momConfirmed = !!(mom && mom.confirmed);
+
   if (phase === "reversal_up") {
-    scoreBuy += 28 + Math.min(12, strength * 2);
+    const base = momConfirmed ? 34 : 24;
+    scoreBuy += base + Math.min(10, strength * 1.5);
     reasons.push("rev_up");
+    if (momConfirmed) reasons.push("rev_confirmed");
   } else if (phase === "reversal_down") {
-    scoreSell += 28 + Math.min(12, strength * 2);
+    const base = momConfirmed ? 34 : 24;
+    scoreSell += base + Math.min(10, strength * 1.5);
     reasons.push("rev_down");
+    if (momConfirmed) reasons.push("rev_confirmed");
   } else if (phase === "rally") {
-    scoreBuy += 8;
-    scoreSell += strength >= 1.5 ? 10 : 4; // extended rally → caution for holders
+    scoreBuy += 6;
+    // Extended rally: holders should prepare to take profit, not chase
+    scoreSell += strength >= 1.8 ? 12 : strength >= 1.0 ? 7 : 3;
     reasons.push("rally");
   } else if (phase === "dump") {
-    scoreSell += 8;
-    scoreBuy += strength >= 1.5 ? 10 : 4;
+    scoreSell += 6;
+    // Active dump: do NOT award buy points (was the main bug — knife catching)
+    // Only a small watch bias if already very oversold + not strong downtrend
+    if (regime !== "downtrend" && strength < 2.5) {
+      scoreBuy += 2;
+    } else {
+      scoreBuy -= 8; // penalty for buying into active dump in downtrend
+      reasons.push("dump_penalty");
+    }
     reasons.push("dump");
   }
 
-  // Range extremes confluence
+  // Range extremes — mean-reversion only strong with confluence or supportive regime
   let nearLowCount = 0, nearHighCount = 0;
+  let nearLowShort = 0, nearHighShort = 0;
   for (const s of stats) {
     if (s.nearLow) {
       nearLowCount++;
-      const add = shortIds.has(s.id) ? 14 : 8;
+      if (shortIds.has(s.id)) nearLowShort++;
+      // Base points reduced; extra only with confluence later
+      const add = shortIds.has(s.id) ? 9 : 5;
       scoreBuy += add;
       reasons.push("near_low_" + s.id);
     }
     if (s.nearHigh) {
       nearHighCount++;
-      const add = shortIds.has(s.id) ? 14 : 8;
+      if (shortIds.has(s.id)) nearHighShort++;
+      const add = shortIds.has(s.id) ? 9 : 5;
       scoreSell += add;
       reasons.push("near_high_" + s.id);
     }
   }
 
-  // Violent moves
+  // Confluence bonus / penalty
+  if (nearLowShort >= minNearConfluence) {
+    scoreBuy += 10;
+    reasons.push("near_low_confluence");
+  } else if (nearLowCount === 1 && phase !== "reversal_up") {
+    // Single TF near-low without reversal is weak — trim
+    scoreBuy -= 4;
+  }
+  if (nearHighShort >= minNearConfluence) {
+    scoreSell += 10;
+    reasons.push("near_high_confluence");
+  } else if (nearHighCount === 1 && phase !== "reversal_down") {
+    scoreSell -= 4;
+  }
+
+  // Regime gates on mean-reversion
+  if (regime === "downtrend") {
+    reasons.push("regime_down");
+    // In downtrend, pure near-low is less trustworthy without reversal
+    if (phase !== "reversal_up") {
+      scoreBuy -= 12;
+    } else {
+      scoreBuy += 6; // reversal against downtrend is higher quality
+      reasons.push("rev_vs_downtrend");
+    }
+    // Selling into strength of downtrend is fine
+    if (phase === "rally" || nearHighCount > 0) scoreSell += 4;
+  } else if (regime === "uptrend") {
+    reasons.push("regime_up");
+    if (phase !== "reversal_down") {
+      scoreSell -= 12;
+    } else {
+      scoreSell += 6;
+      reasons.push("rev_vs_uptrend");
+    }
+    if (phase === "dump" || nearLowCount > 0) scoreBuy += 4;
+  } else {
+    reasons.push("regime_range");
+    // Range: mean-reversion is more valid
+    if (nearLowShort >= 1) scoreBuy += 4;
+    if (nearHighShort >= 1) scoreSell += 4;
+  }
+
+  // Violent moves — context, not automatic counter-trade
   for (const s of stats) {
     if (!s.violentMove) continue;
     if (s.moveDir === "down") {
-      scoreBuy += shortIds.has(s.id) ? 10 : 5;
-      reasons.push("violent_drop_" + s.id);
+      // Violent drop: watch for bounce only if not strong downtrend, else caution
+      if (regime === "downtrend") {
+        scoreSell += shortIds.has(s.id) ? 4 : 2;
+        reasons.push("violent_drop_" + s.id);
+      } else {
+        scoreBuy += shortIds.has(s.id) ? 7 : 3;
+        reasons.push("violent_drop_" + s.id);
+      }
     } else if (s.moveDir === "up") {
-      scoreSell += shortIds.has(s.id) ? 10 : 5;
-      reasons.push("violent_rally_" + s.id);
+      if (regime === "uptrend") {
+        scoreBuy += shortIds.has(s.id) ? 4 : 2;
+        reasons.push("violent_rally_" + s.id);
+      } else {
+        scoreSell += shortIds.has(s.id) ? 7 : 3;
+        reasons.push("violent_rally_" + s.id);
+      }
     }
   }
 
-  // Asymmetry of room: more upside than downside favors buy (and vice versa)
+  // Asymmetry of room (stricter)
   if (targetUpPct != null && targetDownPct != null) {
-    if (targetUpPct > targetDownPct * 1.35 && targetUpPct >= 1.2) {
-      scoreBuy += 10;
+    if (targetUpPct > targetDownPct * 1.5 && targetUpPct >= 2.0) {
+      scoreBuy += 8;
       reasons.push("asymm_up");
-    } else if (targetDownPct > targetUpPct * 1.35 && targetDownPct >= 1.2) {
-      scoreSell += 10;
+    } else if (targetDownPct > targetUpPct * 1.5 && targetDownPct >= 2.0) {
+      scoreSell += 8;
       reasons.push("asymm_down");
     }
   }
 
-  // Cap scores
-  scoreBuy = Math.min(100, Math.round(scoreBuy));
-  scoreSell = Math.min(100, Math.round(scoreSell));
+  // Floor at 0, cap at 100
+  scoreBuy = Math.max(0, Math.min(100, Math.round(scoreBuy)));
+  scoreSell = Math.max(0, Math.min(100, Math.round(scoreSell)));
 
   let action = "HOLD";
   let confidence = 0;
-  const minConf = tradeCfg.minConfidence != null ? tradeCfg.minConfidence : 55;
+  const minConf = tradeCfg.minConfidence != null ? tradeCfg.minConfidence : 68;
 
   if (scoreBuy >= scoreSell && scoreBuy >= minConf) {
     action = "BUY";
@@ -867,13 +1158,25 @@ export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT
     confidence = Math.max(scoreBuy, scoreSell);
   }
 
-  // Don't fight hard position lock for weak signals
-  if (action === "BUY" && stance.action === "sell" && confidence < 70) {
+  // Don't fight hard position lock for weak-medium signals
+  if (action === "BUY" && stance.action === "sell" && confidence < 78) {
     action = "HOLD";
   }
-  if (action === "SELL" && stance.action === "buy" && confidence < 70) {
+  if (action === "SELL" && stance.action === "buy" && confidence < 78) {
     action = "HOLD";
   }
+
+  // Final quality gate: pure "hold USDT + one near low" must not fire BUY
+  if (action === "BUY" && phase !== "reversal_up" && nearLowShort < minNearConfluence && regime === "downtrend") {
+    action = "HOLD";
+    confidence = Math.min(confidence, minConf - 1);
+  }
+  if (action === "SELL" && phase !== "reversal_down" && nearHighShort < minNearConfluence && regime === "uptrend") {
+    action = "HOLD";
+    confidence = Math.min(confidence, minConf - 1);
+  }
+
+  const market = cfg.market || null;
 
   return {
     action,
@@ -889,6 +1192,19 @@ export function analyzeTradeOpportunity(live, hist, mom, mtf, pos, cfg = DEFAULT
     scoreSell,
     phase,
     stance: stance.mode,
+    regime,
+    /** GRAM-specific market snapshot when withMarketStats() was used */
+    market: market
+      ? {
+          atrPct: market.atrPct,
+          realizedVolPct: market.realizedVolPct,
+          range24hPct: market.range24hPct,
+          range7dPct: market.range7dPct,
+          posIn7d: market.posIn7d,
+          sizeScale: market.sizeScale,
+          stopLossPct: cfg.stopLossPct,
+        }
+      : null,
   };
 }
 
