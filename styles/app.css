@@ -997,3 +997,34 @@ details.adv .adv-body {
   color: var(--accent, #60a5fa);
   font-weight: 600;
 }
+
+
+/* Multi-wallet portfolio panels */
+.wallet-panels { display: flex; flex-direction: column; gap: 14px; width: 100%; }
+.wallet-panel {
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 14px;
+  padding: 12px 12px 8px;
+  background: var(--surface-2, rgba(255,255,255,0.03));
+}
+.wallet-panel-title {
+  font-weight: 700;
+  font-size: 14px;
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wallet-panel-title .addr {
+  font-weight: 500;
+  font-size: 11px;
+  opacity: 0.65;
+  font-family: ui-monospace, monospace;
+  direction: ltr;
+}
+.wallet-panel .stats { margin: 0; }
+.wallet-totals {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border, rgba(255,255,255,0.1));
+}
